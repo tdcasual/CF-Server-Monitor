@@ -42,7 +42,7 @@ jobs:
           DATE=$(date -u +%Y%m%d)
           BRANCH="sync/upstream-${DATE}"
           echo "BRANCH=${BRANCH}" >> $GITHUB_OUTPUT
-          git checkout -B "${BRANCH}" fork/main
+          git checkout -B "${BRANCH}" origin/main
         id: branch
 
       - name: Merge upstream
@@ -55,7 +55,6 @@ jobs:
             echo "MERGE_STATUS=conflict" >> $GITHUB_OUTPUT
             echo "Conflicts:"
             git ls-files -u
-            # abort so we can still create a PR for human review
             git merge --abort || true
           fi
 
@@ -67,9 +66,8 @@ jobs:
             echo "OVERLAY_DIRTY=unknown" >> $GITHUB_OUTPUT
             exit 0
           fi
-          # Compare overlay files against origin/main to detect silent auto-merge drift.
           for f in wrangler.toml .github/workflows/deploy.yml; do
-            remote_sha=$(git rev-parse "fork/main:${f}:${f}" 2>/dev/null || echo missing)
+            remote_sha=$(git rev-parse "origin/main:${f}" 2>/dev/null || echo missing)
             local_sha=$(git hash-object "${f}")
             echo "${f}: remote=${remote_sha} local=${local_sha}"
             if [ "${remote_sha}" != "${local_sha}" ]; then
@@ -95,7 +93,7 @@ jobs:
             echo "REASON=overlay-drift" >> $GITHUB_OUTPUT
             exit 0
           fi
-          if git diff --quiet fork/main HEAD; then
+          if git diff --quiet origin/main HEAD; then
             echo "HAS_DIFF=no" >> $GITHUB_OUTPUT
             echo "REASON=no-upstream-changes" >> $GITHUB_OUTPUT
           else
@@ -107,7 +105,7 @@ jobs:
         if: steps.diff.outputs.HAS_DIFF == 'yes' && (inputs.dry_run != 'true')
         run: |
           BRANCH="${{ steps.branch.outputs.BRANCH }}"
-          git push --force-with-lease=main:fork/main fork "HEAD:refs/heads/${BRANCH}"
+          git push --force origin "HEAD:refs/heads/${BRANCH}"
 
       - name: Open PR
         if: steps.diff.outputs.HAS_DIFF == 'yes'
