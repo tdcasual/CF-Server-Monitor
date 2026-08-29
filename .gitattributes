@@ -1,2 +1,6 @@
 wrangler.toml merge=ours
 .github/workflows/deploy.yml merge=ours
+
+# Upstream's sync.yml re-introduced a direct-to-main cron after we retired it.
+# Keep ours (a deprecation tombstone) on auto-merge.
+.github/workflows/sync.yml merge=ours

@@ -1,38 +1,28 @@
-name: Upstream Sync (manual only)
+name: Upstream Sync (deprecated)
 
-permissions:
-  contents: write
+# DEPRECATED 2026-08-29:
+# - The original aormsby/Fork-Sync-With-Upstream-action cron pushed directly to
+#   main, which clobbered our site-identity overlay (wrangler.toml + D1 id).
+# - Replacement: .github/workflows/daily-upstream-sync.yml runs at 00:00 UTC,
+#   fetches upstream, opens a draft PR when there are changes, never pushes to
+#   main directly. Manual merge after review.
+# - This file is kept as a deprecation tombstone so anyone landing here from a
+#   web search or older runbook sees the message instead of a working-but-dangerous
+#   cron. It also overrides upstream's sync.yml via .gitattributes `merge=ours`.
 
 on:
   workflow_dispatch:
-    inputs:
-      test_mode:
-        description: "Run action in test mode"
-        required: false
-        default: "false"
+
+permissions:
+  contents: read
 
 jobs:
-  sync_latest_from_upstream:
-    name: Sync latest commits from upstream repo
+  notice:
+    name: Notice only
     runs-on: ubuntu-latest
-    if: ${{ github.event.repository.fork }}
-
     steps:
-      - name: Checkout target repo
-        uses: actions/checkout@v4
-
-      - name: Sync upstream changes
-        id: sync
-        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
-        with:
-          upstream_sync_repo: huilang-me/CF-Server-Monitor
-          upstream_sync_branch: main
-          target_sync_branch: main
-          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
-          sync_test_mode: ${{ inputs.test_mode }}
-
-      - name: Sync check
-        if: failure()
+      - name: This workflow is retired
         run: |
-          echo "[Error] Auto cron retired; use daily-upstream-sync workflow or manual PR."
-          exit 1
+          echo "[DEPRECATED] Use daily-upstream-sync instead."
+          echo "  - Auto: 00:00 UTC cron in .github/workflows/daily-upstream-sync.yml"
+          echo "  - Manual: gh workflow run daily-upstream-sync.yml -R tdcasual/CF-Server-Monitor"
