@@ -14,60 +14,35 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     name: Deploy
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
     steps:
-      - name: 📥 Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 🔧 Setup Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      - name: 📦 Install dependencies
+      - name: Install dependencies
         run: npm install
 
-      - name: 🏗️ Build frontend assets
+      - name: Build frontend assets
         run: npm run build:frontend
 
-      # NOTE: 不再在这里重新生成 wrangler.toml。
-      # wrangler.toml 已经在仓库里，包含 custom_domain / D1 ID / Durable Object 配置。
-      # 这里只确认文件存在且可解析，避免被误删。
-      - name: 🔍 Verify wrangler.toml
+      - name: Verify wrangler.toml
         run: |
-          test -f wrangler.toml || (echo "wrangler.toml missing" && exit 1)
+          set -euo pipefail
+          test -f wrangler.toml
+          grep -q 'name = "server-monitor-pro"' wrangler.toml
           grep -q 'custom_domain = true' wrangler.toml
           grep -q 'server-monitor-db' wrangler.toml
-          echo "✅ wrangler.toml looks good"
+          grep -q 'crons' wrangler.toml
+          echo "wrangler.toml ok"
 
-      # 优先用 wrangler secret put 注入敏感变量（不入代码/不入 git）。
-      # 反复 put 是幂等的；值变化才会更新。
-      - name: 🔐 Push API_SECRET
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          wranglerVersion: '4'
-          command: secret put API_SECRET --name server-monitor-pro
-
-      - name: 🔐 Push API_USER_NAME
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          wranglerVersion: '4'
-          command: secret put API_USER_NAME --name server-monitor-pro
-
-      - name: 🔐 Push CORS_ALLOWED_ORIGINS
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          wranglerVersion: '4'
-          command: secret put CORS_ALLOWED_ORIGINS --name server-monitor-pro
-
-      # wrangler v4 的 deploy 会根据 wrangler.toml 中的 [[durable_objects.bindings]]
-      # 自动创建/复用 DO namespace（幂等）。
-      - name: 🚀 Deploy to Cloudflare Workers
+      - name: Deploy Worker
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
@@ -75,16 +50,7 @@ jobs:
           wranglerVersion: '4'
           command: deploy
 
-      - name: ✅ Deployment Success
-        if: success()
+      - name: Note secrets stay local
         run: |
-          echo "============================================"
-          echo "  🎉 部署成功！"
-          echo "============================================"
-
-      - name: ❌ Deployment Failed
-        if: failure()
-        run: |
-          echo "============================================"
-          echo "  💥 部署失败！请检查 Actions 日志"
-          echo "============================================"
+          echo "Worker secrets (API_SECRET / API_USER_NAME / CORS_ALLOWED_ORIGINS) are not put in CI."
+          echo "Update them with: wrangler secret put NAME --name server-monitor-pro"
