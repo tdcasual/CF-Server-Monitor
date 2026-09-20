@@ -42,11 +42,9 @@ const renderMikusStartupLoading = (siteTitle) => {
   const title = escapeHtml(String(siteTitle || 'Komari').trim() || 'Komari')
   const loliUrl = getMikusAssetUrl('loli.gif')
   const logoUrl = getMikusAssetUrl('miku.png')
-  const petals = Array.from({ length: 18 }, () => '<span class="mikus-background-petal"></span>').join('')
   loading.dataset.mikusRendered = '1'
   loading.classList.add('mikus-startup')
   loading.innerHTML = `
-    <div class="mikus-sakura-background mikus-startup-sakura" aria-hidden="true">${petals}</div>
     <div class="mikus-startup-loading">
       <img class="mikus-startup-gif" src="${loliUrl}" alt="Loading">
       <div class="mikus-startup-brand">
@@ -133,6 +131,14 @@ async function fetchConfig() {
       turnstile_enabled: turnstileEnabled,
       turnstile_login_enabled: turnstileLoginEnabled,
       turnstile_site_key: turnstileSiteKey,
+      custom_ct_name: data.custom_ct_name || '电信',
+      custom_cu_name: data.custom_cu_name || '联通',
+      custom_cm_name: data.custom_cm_name || '移动',
+      custom_bd_name: data.custom_bd_name || 'BGP',
+      node_1_name: data.node_1_name || 'Node 1',
+      node_2_name: data.node_2_name || 'Node 2',
+      node_3_name: data.node_3_name || 'Node 3',
+      node_4_name: data.node_4_name || 'Node 4',
       version,
       last_workers_version: lastWorkersVersion,
       last_agent_version: lastAgentVersion,
@@ -153,6 +159,8 @@ async function fetchConfig() {
     turnstile_enabled: false,
     turnstile_login_enabled: false,
     turnstile_site_key: '',
+    custom_ct_name: '电信', custom_cu_name: '联通', custom_cm_name: '移动', custom_bd_name: 'BGP',
+    node_1_name: 'Node 1', node_2_name: 'Node 2', node_3_name: 'Node 3', node_4_name: 'Node 4',
     display_mode: 'bar',
     preferred_theme: 'auto',
     default_language: 'auto',

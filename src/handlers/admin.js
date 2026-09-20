@@ -6,14 +6,14 @@ import { mergeMetricsIntoServer } from '../utils/metrics.js';
 import { verifyTurnstileToken, hashPassword } from '../utils/common.js';
 import { AppError, createSuccessResponse, createBadRequestResponse, createUnauthorizedResponse, createErrorResponse } from '../utils/errors.js';
 import { addServerColumns } from '../database/updateDatabase.js';
-import { clearResourceAlertState, sendNotification } from '../services/notification.js';
+import { clearResourceAlertState, initializeMissingTrafficSnapshots, sendNotification } from '../services/notification.js';
 import { getNextServerHistoryPartitionId, HISTORY_MAX_PARTITION_ID } from '../database/indexOptimization.js';
 import { isValidTrafficCorrection, normalizeConnectionMode, normalizePingMode, normalizeWssReportInterval, validateAgentConfigInput, validatePingNode, validateNetworkInterfaces } from '../utils/agentConfig.js';
 import { scheduleAgentConfigChanged, scheduleAgentReportModeChanged } from '../utils/agentConfigNotify.js';
 import { detectBillingCycle, detectCurrencySymbol, normalizeBillingCycle, normalizeCurrency, normalizePrice, renewExpireDateIfNeeded } from '../utils/serverBilling.js';
 import { THEME_PREVIEW_AUTH_TTL_SECONDS } from '../utils/config.js';
 
-const PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd'];
+const PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', 'node_1', 'node_2', 'node_3', 'node_4'];
 const THEME_PREVIEW_AUTH_COOKIE = 'cfsm_theme_preview_auth';
 const DURABLE_OBJECTS_WEBSOCKET_MESSAGE_BILLING_RATIO = 20;
 
@@ -106,13 +106,18 @@ function normalizePingNodeFields(source, fields = PING_NODE_FIELDS) {
   const values = {};
   for (const field of fields) {
     if (source?.[field] === undefined) continue;
-    const result = validatePingNode(source?.[field]);
+    const result = validatePingNode(source[field]);
     if (!result.valid) {
       return { valid: false, field };
     }
-    values[field] = result.value;
+    // Keep the disabled-node sentinel as text so D1 does not coerce it to 0.0 in TEXT columns.
+    values[field] = source[field] === 0 || source[field] === '0' ? '0' : result.value;
   }
   return { valid: true, values };
+}
+
+function normalizeImportedPingNodeValue(value) {
+  return value === null || value === undefined ? '' : value;
 }
 
 function normalizeNetworkInterfaceField(value) {
@@ -590,6 +595,7 @@ async function handleSaveThemeOptionsAction({ env, sys, data }) {
 async function handleListAction({ env }) {
   const servers = await getAllServers(env.DB);
   const latestMetricsMap = await getLatestMetricsForAllServers(env.DB);
+  await initializeMissingTrafficSnapshots(env.DB, servers, latestMetricsMap);
 
   const now = Date.now();
   const ONLINE_THRESHOLD = 300000;
@@ -782,7 +788,12 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
         ? normalizeResourceAlertRules(settings.resource_alert_rules)
         : currentResourceAlertRules;
       const resourceAlertEnabled = normalizedResourceAlertRules.length > 0;
-      if (tgNotify !== '0' || expireReminder !== '0' || resourceAlertEnabled) {
+      const trafficReportEnabled = normalizeBooleanSetting(
+        settings.traffic_report_enabled !== undefined
+          ? settings.traffic_report_enabled
+          : sys?.traffic_report_enabled
+      ) === 'true';
+      if (tgNotify !== '0' || expireReminder !== '0' || resourceAlertEnabled || trafficReportEnabled) {
         const webhookEnabled = settings.notification_webhook_enabled !== undefined
           ? normalizeBooleanSetting(settings.notification_webhook_enabled) === 'true'
           : normalizeBooleanSetting(sys?.notification_webhook_enabled) === 'true';
@@ -876,6 +887,8 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
             siteOptions[field] = normalizeNotificationTimezone(settings[field]);
           } else if (field === 'expire_notification_time') {
             siteOptions[field] = normalizeExpireNotificationTime(settings[field]);
+          } else if (field === 'traffic_report_enabled') {
+            siteOptions[field] = normalizeBooleanSetting(settings[field]);
           } else if (field === 'notification_webhook_enabled') {
             siteOptions[field] = normalizeBooleanSetting(settings[field]);
           } else if (field === 'notification_webhook_method') {
@@ -987,7 +1000,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
       });
     }
     else if (data.action === 'edit') {
-      const { id, name, server_group, region, tags, note, price, billing_cycle, auto_renewal, currency, expire_date, traffic_limit, traffic_calc_type, interface: networkInterfaceInput, reset_day, collect_interval, report_interval, wss_report_interval, connection_mode, ping_mode, auto_update, custom_ct, custom_cu, custom_cm, custom_bd, rx_correction, tx_correction, offline_notify_disabled, is_hidden } = data;
+      const { id, name, server_group, region, tags, note, price, billing_cycle, auto_renewal, currency, expire_date, traffic_limit, traffic_calc_type, interface: networkInterfaceInput, reset_day, collect_interval, report_interval, wss_report_interval, connection_mode, ping_mode, auto_update, custom_ct, custom_cu, custom_cm, custom_bd, node_1, node_2, node_3, node_4, rx_correction, tx_correction, offline_notify_disabled, is_hidden } = data;
       if (!id || !isValidUUID(id)) {
         return createBadRequestResponse('invalidServerId');
       }
@@ -1005,7 +1018,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
       }
       const normalizedAgentConfig = agentConfigResult.config;
 
-      const pingNodes = normalizePingNodeFields({ custom_ct, custom_cu, custom_cm, custom_bd });
+      const pingNodes = normalizePingNodeFields({ custom_ct, custom_cu, custom_cm, custom_bd, node_1, node_2, node_3, node_4 });
       if (!pingNodes.valid) {
         return createBadRequestResponse('invalidPingNodeFormat');
       }
@@ -1042,7 +1055,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
       try {
         await env.DB.prepare(`
           UPDATE servers
-          SET name = ?, server_group = ?, region = ?, tags = ?, note = ?, price = ?, billing_cycle = ?, auto_renewal = ?, currency = ?, expire_date = ?, traffic_limit = ?, traffic_calc_type = ?, "interface" = ?, reset_day = ?, collect_interval = ?, report_interval = ?, wss_report_interval = ?, connection_mode = ?, ping_mode = ?, auto_update = ?, custom_ct = ?, custom_cu = ?, custom_cm = ?, custom_bd = ?, rx_correction = ?, tx_correction = ?, offline_notify_disabled = ?, is_hidden = ?
+          SET name = ?, server_group = ?, region = ?, tags = ?, note = ?, price = ?, billing_cycle = ?, auto_renewal = ?, currency = ?, expire_date = ?, traffic_limit = ?, traffic_calc_type = ?, "interface" = ?, reset_day = ?, collect_interval = ?, report_interval = ?, wss_report_interval = ?, connection_mode = ?, ping_mode = ?, auto_update = ?, custom_ct = ?, custom_cu = ?, custom_cm = ?, custom_bd = ?, node_1 = ?, node_2 = ?, node_3 = ?, node_4 = ?, rx_correction = ?, tx_correction = ?, offline_notify_disabled = ?, is_hidden = ?
           WHERE id = ?
         `).bind(
           name || '',
@@ -1065,10 +1078,14 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
           normalizedAgentConfig.connection_mode,
           normalizedAgentConfig.ping_mode,
           normalizeBooleanFlag(auto_update),
-          pingNodes.values.custom_ct,
-          pingNodes.values.custom_cu,
-          pingNodes.values.custom_cm,
-          pingNodes.values.custom_bd,
+          pingNodes.values.custom_ct ?? null,
+          pingNodes.values.custom_cu ?? null,
+          pingNodes.values.custom_cm ?? null,
+          pingNodes.values.custom_bd ?? null,
+          pingNodes.values.node_1 ?? null,
+          pingNodes.values.node_2 ?? null,
+          pingNodes.values.node_3 ?? null,
+          pingNodes.values.node_4 ?? null,
           safeRx,
           safeTx,
           normalizeBooleanFlag(offline_notify_disabled),
@@ -1186,9 +1203,9 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
             INSERT INTO servers (id, name, server_group, region, tags, note, price, billing_cycle, auto_renewal,
               currency, expire_date,
               traffic_limit, traffic_calc_type, "interface", reset_day, collect_interval, report_interval, wss_report_interval, connection_mode, ping_mode,
-              auto_update, custom_ct, custom_cu, custom_cm, custom_bd, rx_correction, tx_correction,
+              auto_update, custom_ct, custom_cu, custom_cm, custom_bd, node_1, node_2, node_3, node_4, rx_correction, tx_correction,
               offline_notify_disabled, is_hidden, sort_order, history_partition_id, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).bind(
             server.id,
             server.name || '',
@@ -1211,10 +1228,12 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
             normalizeConnectionMode(server.connection_mode) || 'auto',
             normalizePingMode(server.ping_mode) || 'tcp',
             normalizeBooleanFlag(server.auto_update),
-            server.custom_ct || '',
-            server.custom_cu || '',
-            server.custom_cm || '',
-            server.custom_bd || '',
+            normalizeImportedPingNodeValue(server.custom_ct),
+            normalizeImportedPingNodeValue(server.custom_cu),
+            normalizeImportedPingNodeValue(server.custom_cm),
+            normalizeImportedPingNodeValue(server.custom_bd),
+            normalizeImportedPingNodeValue(server.node_1), normalizeImportedPingNodeValue(server.node_2),
+            normalizeImportedPingNodeValue(server.node_3), normalizeImportedPingNodeValue(server.node_4),
             server.rx_correction ?? null,
             server.tx_correction ?? null,
             normalizeBooleanFlag(server.offline_notify_disabled),

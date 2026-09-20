@@ -15,6 +15,22 @@ import {
   DASHBOARD_LATENCY_WINDOW_POINTS,
   DASHBOARD_LATEST_REPORT_ID_CHUNK_SIZE
 } from '../utils/config.js';
+import { initializeMissingTrafficSnapshots } from '../services/notification.js';
+
+const PROBE_FIELDS = ['ct', 'cu', 'cm', 'bd', 'node_1', 'node_2', 'node_3', 'node_4'];
+
+// REST 接口中，丢包值为 null 表示该探针没有可用样本；此时隐藏对应的延迟和丢包字段。
+export function omitNullLossProbeFields(item) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+  const result = { ...item };
+  for (const field of PROBE_FIELDS) {
+    if (result[`loss_${field}`] === null) {
+      delete result[`loss_${field}`];
+      delete result[`ping_${field}`];
+    }
+  }
+  return result;
+}
 
 function createEmptyLatencyWindow() {
   return { ping: [], loss: [] };
@@ -45,6 +61,7 @@ function withoutPrivateServerFields(server) {
   delete item.bandwidth;
   delete item.note;
   delete item.auto_update;
+  delete item.traffic_snapshots;
   return normalizePublicIpFields(item);
 }
 
@@ -189,7 +206,7 @@ export async function handleServerAPI(request, env, sys) {
     long_history_points: Number(normalizeLongHistoryPoints(sys.long_history_points))
   };
   
-  return createSuccessResponse(withoutPrivateServerFields(server));
+  return createSuccessResponse(omitNullLossProbeFields(withoutPrivateServerFields(server)));
 }
 
 export async function handleServersAPI(request, env, sys) {
@@ -200,7 +217,8 @@ export async function handleServersAPI(request, env, sys) {
   }
   markFrontendRealtimeActive();
   
-  const results = (await getAllServers(env.DB, isLoggedIn)).map(withoutPrivateServerFields);
+  const sourceServers = await getAllServers(env.DB, isLoggedIn);
+  const results = sourceServers.map(withoutPrivateServerFields);
   const shouldIncludeLatencyHistory = sys.show_three_net_details === 'true';
   
   const serverIds = results.map(server => server.id).filter(Boolean);
@@ -211,6 +229,7 @@ export async function handleServersAPI(request, env, sys) {
       ? getDashboardLatencyHistory(env.DB, results)
       : Promise.resolve(new Map())
   ]);
+  await initializeMissingTrafficSnapshots(env.DB, sourceServers, latestMetricsMap);
   attachLatencyHistoryToServers(results, latencyHistory);
   
   const now = Date.now();
@@ -264,6 +283,10 @@ export async function handleServersAPI(request, env, sys) {
       show_expire: sys.show_expire === 'true',
       show_tf: sys.show_tf === 'true',
       show_three_net_details: sys.show_three_net_details === 'true',
+      custom_ct_name: sys.custom_ct_name || '电信',
+      custom_cu_name: sys.custom_cu_name || '联通',
+      custom_cm_name: sys.custom_cm_name || '移动',
+      custom_bd_name: sys.custom_bd_name || 'BGP',
       display_mode: sys.display_mode || 'bar',
       latency_window: {
         points: DASHBOARD_LATENCY_WINDOW_POINTS,

@@ -246,9 +246,21 @@
 
           <div class="form-group flex-1">
             <label class="form-label">{{ trans.expireReminder }}</label>
-            <select v-model="settings.expire_reminder" class="form-select">
+            <select v-model="selectedExpireReminder" class="form-select">
               <option v-for="option in expireReminderOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+              <option :value="CUSTOM_EXPIRE_REMINDER_VALUE">{{ trans.custom || 'Custom' }}</option>
             </select>
+            <input
+              v-if="showCustomExpireReminder"
+              type="number"
+              v-model.number="settings.expire_reminder"
+              @focus="markCustomExpireReminder"
+              class="form-input mt-2"
+              min="1"
+              :max="EXPIRE_REMINDER_DAYS_MAX"
+              step="1"
+              :placeholder="trans.expireReminderCustomPlaceholder || 'Days before expiration'"
+            >
           </div>
 
           <div class="form-group flex-1">
@@ -277,6 +289,19 @@
               class="form-input mt-2"
               placeholder="Asia/Shanghai"
             >
+          </div>
+
+          <div class="form-group flex-1">
+            <label class="form-label">
+              {{ trans.trafficReport || 'Traffic reports' }}
+              <HelpTooltip
+                :text="`⚠️ ${trans.trafficReportRestartWarning || 'Traffic uses network-interface counters. A server or Agent restart may reset them and make the current report period inaccurate.'}`"
+              />
+            </label>
+            <select v-model="settings.traffic_report_enabled" class="form-select">
+              <option :value="false">{{ trans.disabled || 'Disabled' }}</option>
+              <option :value="true">{{ trans.enabled || 'Enabled' }}</option>
+            </select>
           </div>
 
           <div class="form-group flex-1">
@@ -652,30 +677,42 @@
       <div class="settings-section">
         <div class="section-title"><span>▸</span> {{ trans.pingNodes }}</div>
 
-        <div class="form-row">
-          <div class="form-group flex-1">
-            <label class="form-label">{{ trans.customCt }}</label>
+        <div class="ping-node-grid">
+          <div class="ping-node-item">
+            <div class="ping-node-fields"><input type="text" v-model.trim="settings.custom_ct_name" class="form-input ping-node-name"><span class="ping-node-arrow">→</span>
             <input type="text" v-model.trim="settings.custom_ct" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_ct }]" placeholder="gd-ct-dualstack.ip.zstaticcdn.com">
-            <p v-if="pingNodeErrors.custom_ct" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_ct }}</p>
+            </div><p v-if="pingNodeErrors.custom_ct" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_ct }}</p>
           </div>
 
-          <div class="form-group flex-1">
-            <label class="form-label">{{ trans.customCu }}</label>
+          <div class="ping-node-item">
+            <div class="ping-node-fields"><input type="text" v-model.trim="settings.custom_cu_name" class="form-input ping-node-name"><span class="ping-node-arrow">→</span>
             <input type="text" v-model.trim="settings.custom_cu" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_cu }]" placeholder="gd-cu-dualstack.ip.zstaticcdn.com">
-            <p v-if="pingNodeErrors.custom_cu" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_cu }}</p>
+            </div><p v-if="pingNodeErrors.custom_cu" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_cu }}</p>
           </div>
         </div>
-        <div class="form-row">
-          <div class="form-group flex-1">
-            <label class="form-label">{{ trans.customCm }}</label>
+        <div class="ping-node-grid">
+          <div class="ping-node-item">
+            <div class="ping-node-fields"><input type="text" v-model.trim="settings.custom_cm_name" class="form-input ping-node-name"><span class="ping-node-arrow">→</span>
             <input type="text" v-model.trim="settings.custom_cm" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_cm }]" placeholder="gd-cm-dualstack.ip.zstaticcdn.com">
-            <p v-if="pingNodeErrors.custom_cm" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_cm }}</p>
+            </div><p v-if="pingNodeErrors.custom_cm" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_cm }}</p>
           </div>
 
-          <div class="form-group flex-1">
-            <label class="form-label">{{ trans.customBd }}</label>
+          <div class="ping-node-item">
+            <div class="ping-node-fields"><input type="text" v-model.trim="settings.custom_bd_name" class="form-input ping-node-name"><span class="ping-node-arrow">→</span>
             <input type="text" v-model.trim="settings.custom_bd" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_bd }]" placeholder="ip.zstaticcdn.com">
-            <p v-if="pingNodeErrors.custom_bd" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_bd }}</p>
+            </div><p v-if="pingNodeErrors.custom_bd" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_bd }}</p>
+          </div>
+        </div>
+        <div class="ping-node-grid">
+          <div v-for="field in ['node_1', 'node_2']" :key="field" class="ping-node-item">
+            <div class="ping-node-fields"><input type="text" v-model.trim="settings[`${field}_name`]" class="form-input ping-node-name"><span class="ping-node-arrow">→</span><input type="text" v-model.trim="settings[field]" :class="['form-input', { 'input-invalid': pingNodeErrors[field] }]" placeholder="host[:port] / [IPv6]:port"></div>
+            <p v-if="pingNodeErrors[field]" class="text-red text-sm mt-1">{{ pingNodeErrors[field] }}</p>
+          </div>
+        </div>
+        <div class="ping-node-grid">
+          <div v-for="field in ['node_3', 'node_4']" :key="field" class="ping-node-item">
+            <div class="ping-node-fields"><input type="text" v-model.trim="settings[`${field}_name`]" class="form-input ping-node-name"><span class="ping-node-arrow">→</span><input type="text" v-model.trim="settings[field]" :class="['form-input', { 'input-invalid': pingNodeErrors[field] }]" placeholder="host[:port] / [IPv6]:port"></div>
+            <p v-if="pingNodeErrors[field]" class="text-red text-sm mt-1">{{ pingNodeErrors[field] }}</p>
           </div>
         </div>
       </div>
@@ -725,9 +762,55 @@ const commonNotificationTimezones = [
   'America/New_York',
   'America/Los_Angeles'
 ]
+const EXPIRE_REMINDER_DAYS_MAX = 365
+const CUSTOM_EXPIRE_REMINDER_VALUE = '__custom__'
 const CUSTOM_NOTIFICATION_TIMEZONE_VALUE = '__custom__'
+const manualCustomExpireReminder = ref(false)
 const manualCustomNotificationTimezone = ref(false)
 const isCommonNotificationTimezone = (value) => commonNotificationTimezones.includes(String(value || '').trim())
+
+const isPresetExpireReminder = (value) => {
+  const reminder = String(value ?? '').trim()
+  return reminder === '0' || (Number.isInteger(Number(reminder)) && Number(reminder) >= 1 && Number(reminder) <= 7)
+}
+
+const selectedExpireReminder = computed({
+  get: () => {
+    const currentReminder = String(props.settings.expire_reminder ?? '').trim()
+    if (manualCustomExpireReminder.value || !isPresetExpireReminder(currentReminder)) {
+      return CUSTOM_EXPIRE_REMINDER_VALUE
+    }
+    return currentReminder || '0'
+  },
+  set: (value) => {
+    if (value === CUSTOM_EXPIRE_REMINDER_VALUE) {
+      manualCustomExpireReminder.value = true
+      const currentReminder = Number(props.settings.expire_reminder)
+      if (!Number.isInteger(currentReminder) || currentReminder < 1 || currentReminder > EXPIRE_REMINDER_DAYS_MAX) {
+        props.settings.expire_reminder = '8'
+      }
+      return
+    }
+    manualCustomExpireReminder.value = false
+    props.settings.expire_reminder = value
+  }
+})
+
+const showCustomExpireReminder = computed(() => selectedExpireReminder.value === CUSTOM_EXPIRE_REMINDER_VALUE)
+
+const markCustomExpireReminder = () => {
+  manualCustomExpireReminder.value = true
+}
+
+// Reset the local custom-mode flag only when switching to a different settings
+// object. Changes made while typing must not collapse the input after the
+// first digit (for example, typing "12" briefly produces "1").
+watch(
+  () => props.settings,
+  () => {
+    manualCustomExpireReminder.value = false
+  }
+)
 
 const selectedNotificationTimezone = computed({
   get: () => {
