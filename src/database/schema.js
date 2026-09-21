@@ -2,7 +2,12 @@ import { getAllServers, getLatestMetricsCache, setLatestMetricsCache, getMetrics
 import { saveSiteOptions, debug, getSettingByKey, normalizeLongHistoryPoints, DEFAULT_LONG_HISTORY_POINTS } from '../utils/settings.js';
 import { attachDiskMetricsObject, flattenDiskMetrics, isDisabledProbeMetric, normalizeProbeMetricRow } from '../utils/metrics.js';
 import { ensureServerOptimization, buildHistoryId, getServerHistoryInfo, getHistoryIdRange } from './indexOptimization.js';
-import { addHistoryColumns, ensureHistoryIndex, isHistoryOptimized } from './updateDatabase.js';
+import {
+  addHistoryColumns,
+  ensureHistoryIndex,
+  ensureNotificationDeliveryTable,
+  isHistoryOptimized
+} from './updateDatabase.js';
 import {
   buildSparseHistoryQuery,
   shouldUseSparseHistorySampling
@@ -21,10 +26,12 @@ import {
 
 let dbInitialized = false;
 
-const LOSS_AGG_COLUMNS = new Set(['loss_ct', 'loss_cu', 'loss_cm', 'loss_bd']);
+const LOSS_AGG_COLUMNS = new Set(['loss_ct', 'loss_cu', 'loss_cm', 'loss_bd', 'loss_node_1', 'loss_node_2', 'loss_node_3', 'loss_node_4']);
 const DEFAULT_HISTORY_MAX_POINTS = 160;
-const LATENCY_NODE_FIELDS = ['ct', 'cu', 'cm', 'bd'];
+const LATENCY_NODE_FIELDS = ['ct', 'cu', 'cm', 'bd', 'node_1', 'node_2', 'node_3', 'node_4'];
 const DASHBOARD_LATENCY_COLUMNS = LATENCY_NODE_FIELDS
+  .flatMap(field => [`ping_${field}`, `loss_${field}`]);
+const LEGACY_DASHBOARD_LATENCY_COLUMNS = ['ct', 'cu', 'cm', 'bd']
   .flatMap(field => [`ping_${field}`, `loss_${field}`]);
 const dashboardLatencyHistoryCache = new Map();
 
@@ -86,6 +93,7 @@ export async function initDatabase(db) {
           expire_date TEXT DEFAULT '',
           traffic_limit TEXT DEFAULT '',
           traffic_calc_type TEXT DEFAULT 'total',
+          traffic_snapshots TEXT DEFAULT '{}',
           "interface" TEXT DEFAULT '',
           reset_day INTEGER DEFAULT 1,
           collect_interval INTEGER DEFAULT 0,
@@ -98,6 +106,10 @@ export async function initDatabase(db) {
           custom_cu TEXT DEFAULT '',
           custom_cm TEXT DEFAULT '',
           custom_bd TEXT DEFAULT '',
+          node_1 TEXT DEFAULT '',
+          node_2 TEXT DEFAULT '',
+          node_3 TEXT DEFAULT '',
+          node_4 TEXT DEFAULT '',
           rx_correction REAL DEFAULT NULL,
           tx_correction REAL DEFAULT NULL,
           offline_notify_disabled TEXT DEFAULT '0',
@@ -121,6 +133,8 @@ export async function initDatabase(db) {
     }else{
       await ensureHistoryIndex(db);
     }
+
+    await ensureNotificationDeliveryTable(db);
 
     debug('✅ 数据库初始化完成');
     dbInitialized = true;
@@ -518,19 +532,29 @@ export async function getDashboardLatencyHistory(db, servers, options = {}) {
 
       const intervalMs = Math.max(10_000, Math.ceil((queryEnd - queryStart) / points));
       const idPrefix = getHistoryIdRange(historyInfo.partitionId).startId;
-      const sparseQuery = buildSparseHistoryQuery({
-        columns,
-        queryStart,
-        queryEnd,
-        firstRangeEnd: Math.min(queryEnd, queryStart + intervalMs),
-        intervalMs,
-        idPrefix,
-        oldTableExists,
-        tableBoundary: thisSunday.getTime(),
-        sampleOrder: 'DESC'
-      });
+      const querySparseHistory = async queryColumns => {
+        const sparseQuery = buildSparseHistoryQuery({
+          columns: queryColumns,
+          queryStart,
+          queryEnd,
+          firstRangeEnd: Math.min(queryEnd, queryStart + intervalMs),
+          intervalMs,
+          idPrefix,
+          oldTableExists,
+          tableBoundary: thisSunday.getTime(),
+          sampleOrder: 'DESC'
+        });
+        return db.prepare(sparseQuery.sql).bind(...sparseQuery.bindValues).all();
+      };
 
-      const rawResult = await db.prepare(sparseQuery.sql).bind(...sparseQuery.bindValues).all();
+      let rawResult;
+      try {
+        rawResult = await querySparseHistory(columns);
+      } catch (error) {
+        // Existing deployments may serve history before the new probe columns are migrated.
+        if (!/no such column/i.test(String(error?.message || error))) throw error;
+        rawResult = await querySparseHistory(LEGACY_DASHBOARD_LATENCY_COLUMNS.join(', '));
+      }
       const window = normalizeDashboardLatencyWindow(rawResult.results, { queryStart, intervalMs, points });
       result.set(serverId, window);
       if (useCache) {
@@ -652,10 +676,18 @@ export async function saveMetricsHistory(db, serverId, historyPartitionId, metri
     parsePing(metrics.ping_cu),
     parsePing(metrics.ping_cm),
     parsePing(metrics.ping_bd),
+    parsePing(metrics.ping_node_1),
+    parsePing(metrics.ping_node_2),
+    parsePing(metrics.ping_node_3),
+    parsePing(metrics.ping_node_4),
     parseLoss(metrics.loss_ct),
     parseLoss(metrics.loss_cu),
     parseLoss(metrics.loss_cm),
     parseLoss(metrics.loss_bd),
+    parseLoss(metrics.loss_node_1),
+    parseLoss(metrics.loss_node_2),
+    parseLoss(metrics.loss_node_3),
+    parseLoss(metrics.loss_node_4),
     parseFloat(metrics.ram_total) || 0,
     parseFloat(metrics.ram_used) || 0,
     parseFloat(metrics.swap_total) || 0,
@@ -733,7 +765,7 @@ export async function getLatestMetrics(db, serverId, server = null) {
   }
 }
 
-export async function getLatestMetricsForAllServers(db) {
+export async function getLatestMetricsForAllServers(db, providedServers = null) {
   const now = Date.now();
   const cacheInfo = getLatestMetricsCache();
   if (cacheInfo.cache && now - cacheInfo.time < cacheInfo.ttl) {
@@ -744,7 +776,9 @@ export async function getLatestMetricsForAllServers(db) {
   await ensureHistoryIndex(db);
 
   try {
-    const servers = await getAllServers(db);
+    const servers = Array.isArray(providedServers)
+      ? providedServers
+      : await getAllServers(db);
 
     const entries = await Promise.all(
       servers.map(s =>
@@ -760,4 +794,47 @@ export async function getLatestMetricsForAllServers(db) {
     const cacheInfo = getLatestMetricsCache();
     return cacheInfo.cache || new Map();
   }
+}
+
+export async function createTrafficBaselineLookupContext(db, earliestTimestamp, now = Date.now()) {
+  const nowDate = new Date(now);
+  const day = nowDate.getUTCDay();
+  const tableBoundary = Date.UTC(
+    nowDate.getUTCFullYear(),
+    nowDate.getUTCMonth(),
+    nowDate.getUTCDate() - day
+  );
+  const needsOldTable = Number(earliestTimestamp) < tableBoundary;
+  const oldTableExists = needsOldTable && !!await db.prepare(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name='metrics_history_old'`
+  ).first();
+  return { now: Number(now), tableBoundary, oldTableExists };
+}
+
+export async function getTrafficBaselineMetric(db, server, startTimestamp, context) {
+  const serverId = String(server?.id || '').trim();
+  const start = Number(startTimestamp);
+  const end = Number(context?.now || Date.now());
+  if (!serverId || !Number.isFinite(start) || start <= 0 || start >= end) return null;
+
+  const queryTable = async tableName => {
+    const historyInfo = await getServerHistoryInfo(db, serverId, server);
+    if (!historyInfo.partitionId) return null;
+    const range = getHistoryIdRange(historyInfo.partitionId, start, end);
+    return db.prepare(`
+      SELECT timestamp, net_rx, net_tx
+      FROM ${tableName}
+      WHERE id >= ? AND id <= ?
+      ORDER BY id ASC
+      LIMIT 1
+    `).bind(range.startId, range.endId).first();
+  };
+
+  if (context?.oldTableExists && start < Number(context.tableBoundary)) {
+    const oldMetric = await queryTable('metrics_history_old');
+    if (oldMetric) return normalizeProbeMetricRow(oldMetric);
+  }
+
+  const currentMetric = await queryTable('metrics_history');
+  return currentMetric ? normalizeProbeMetricRow(currentMetric) : null;
 }

@@ -5,7 +5,7 @@
 >
 > **Base URL**：`https://<your-worker-domain>`（部署后由 Cloudflare Workers 提供）
 >
-> **最后核对源码日期**：`2026-07-26`
+> **最后核对源码日期**：`2026-09-07`
 >
 > **修订标记约定**：自 `2026-07-26` 起，已过期但有迁移参考价值的说明使用删除线保留，紧随其后给出当前实现。
 >
@@ -366,14 +366,24 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
 | `udp_conn`       | string\|number | -   | 是  | UDP 套接字数                                    |
 | `ip_v4`          | string\|number | -   | 是  | 公网 IPv4 地址；`0` 表示不可达；兼容旧探针 `1` 表示可达但未上报地址 |
 | `ip_v6`          | string\|number | -   | 是  | 公网 IPv6 地址；`0` 表示不可达；兼容旧探针 `1` 表示可达但未上报地址 |
-| `ping_ct`        | string\|number\|false\|null | ms  | 否  | 电信节点延时；空值表示未取到，`false` / `"false"` 表示禁用 |
-| `ping_cu`        | string\|number\|false\|null | ms  | 否  | 联通节点延时                                      |
-| `ping_cm`        | string\|number\|false\|null | ms  | 否  | 移动节点延时                                      |
-| `ping_bd`        | string\|number\|false\|null | ms  | 否  | BGP 节点延时                                    |
-| `loss_ct`        | string\|number\|false\|null | %   | 否  | 电信丢包率                                       |
-| `loss_cu`        | string\|number\|false\|null | %   | 否  | 联通丢包率                                       |
-| `loss_cm`        | string\|number\|false\|null | %   | 否  | 移动丢包率                                       |
-| `loss_bd`        | string\|number\|false\|null | %   | 否  | BGP 丢包率                                     |
+| `ping_ct`        | string\|number\|false\|null | ms  | 否  | 电信节点延时(ms)：`false` / `"false"` 表示未配置/未上报/未取样（前端不显示）；`null` 表示该轮探测全部超时/未取到有效 RTT（前端显示 Timeout）；正数才是有效 RTT |
+| `ping_cu`        | string\|number\|false\|null | ms  | 否  | 联通节点延时，语义同 `ping_ct`                   |
+| `ping_cm`        | string\|number\|false\|null | ms  | 否  | 移动节点延时，语义同 `ping_ct`                   |
+| `ping_bd`        | string\|number\|false\|null | ms  | 否  | BGP 节点延时，语义同 `ping_ct`                  |
+| `ping_node_1`    | string\|number\|false\|null | ms  | 否  | 自定义节点 1 延时，语义同 `ping_ct`              |
+| `ping_node_2`    | string\|number\|false\|null | ms  | 否  | 自定义节点 2 延时，语义同 `ping_ct`              |
+| `ping_node_3`    | string\|number\|false\|null | ms  | 否  | 自定义节点 3 延时，语义同 `ping_ct`              |
+| `ping_node_4`    | string\|number\|false\|null | ms  | 否  | 自定义节点 4 延时，语义同 `ping_ct`              |
+| `loss_ct`        | string\|number\|false|null | %   | 否  | 电信丢包率(%)：`false` / `"false"` 表示未配置/未上报/未取样；`100` 与对应 `ping_*` 的 `null` 同时出现表示该轮全超时；`0` 是有效值 |
+| `loss_cu`        | string\|number\|false|null | %   | 否  | 联通丢包率，语义同 `loss_ct`                    |
+| `loss_cm`        | string\|number\|false|null | %   | 否  | 移动丢包率，语义同 `loss_ct`                    |
+| `loss_bd`        | string\|number\|false|null | %   | 否  | BGP 丢包率，语义同 `loss_ct`                   |
+| `loss_node_1`    | string\|number\|false|null | %   | 否  | 自定义节点 1 丢包率，语义同 `loss_ct`           |
+| `loss_node_2`    | string\|number\|false|null | %   | 否  | 自定义节点 2 丢包率，语义同 `loss_ct`           |
+| `loss_node_3`    | string\|number\|false|null | %   | 否  | 自定义节点 3 丢包率，语义同 `loss_ct`           |
+| `loss_node_4`    | string\|number\|false|null | %   | 否  | 自定义节点 4 丢包率，语义同 `loss_ct`           |
+
+> **Ping/丢包取值约定（2026-09-07 修订）**：WebSocket 采样不携带探针字段时字段直接缺失（`undefined`）；REST `/api/server`、`/api/history/all` 因历史表列固定，统一把“未配置/未上报/未取样”归为 `false`，前端遇 `false` 或字段缺失均不显示。`null` 只用于表示该轮明确探测超时/未取到有效 RTT，前端按 “Timeout/超时” 展示。
 
 **Response**
 
@@ -506,6 +516,10 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
   "turnstile_enabled": true,
   "turnstile_login_enabled": true,
   "turnstile_site_key": "1x00000000000000000000AA",
+  "custom_ct_name": "电信",
+  "custom_cu_name": "联通",
+  "custom_cm_name": "移动",
+  "custom_bd_name": "BGP",
   "site_title": "My Server Monitor",
   "display_mode": "bar",
   "preferred_theme": "auto",
@@ -533,6 +547,7 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
 | `turnstile_enabled`  | boolean      | 站点是否启用人机验证                             |
 | `turnstile_login_enabled` | boolean | 登录是否需要 Turnstile；全局 Turnstile 开启时该值也为 `true` |
 | `turnstile_site_key` | string       | Turnstile 前端公钥；前端拿到后渲染 widget          |
+| `custom_ct_name` / `custom_cu_name` / `custom_cm_name` / `custom_bd_name` | string | Ping 指标显示名称；分别用于 CT、CU、CM、BGP，默认值为电信、联通、移动、BGP |
 | `site_title`         | string       | 站点标题                                         |
 | `display_mode`       | string       | 内置前端显示模式：`bar` / `ring` / `table`        |
 | `preferred_theme`    | string       | 默认外观：`auto` 跟随系统 / `dark` 深色 / `light` 浅色 |
@@ -886,8 +901,8 @@ Sec-WebSocket-Version: 13
 
 | 订阅类型 | 推送方式 | 消息类型 | 说明 |
 | -------- | ----- | ----- | --- |
-| `subscribe=all` | 批量合并，每 5 秒一次 | `batchUpdate` | 减少消息数量，降低前端渲染压力 |
-| `subscribe=<serverId>` | 最长约 5 秒批量窗口 | `batchUpdate` | 单台服务器详情页仅过滤目标 ID，消息仍经统一合并队列 |
+| `subscribe=all` | 批量合并 | `batchUpdate` | Agent WSS 上报按 250ms 窗口合并；HTTP 上报最长约 5 秒，减少消息数量和前端渲染压力 |
+| `subscribe=<serverId>` | 实时推送 | `batchUpdate` | 单台服务器更新不进入 250ms 合并窗口，消息格式与全量订阅一致 |
 
 > `subscribe=all` 默认不推送任何服务器更新。客户端应先调用 `/api/servers` 获取当前可见服务器列表，再通过 WebSocket 通道发送 `subscribe` 消息，使用 `servers[].id` 作为过滤列表。
 
@@ -1154,14 +1169,16 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled` 或
 ```json
 {
   "success": true,
-  "settings": { /* Settings 对象，见 5.4 */ },
+  "settings": { /* Settings 对象（不含 password），并包含 password_configured，见 5.4 */ },
   "api_secret": "<env.API_SECRET>"
 }
 ```
 
+`settings.password` 不会返回；`settings.password_configured` 表示是否已配置独立管理员密码。
+
 > `api_secret` 仅在 `get_settings` 中返回，方便前端展示/复制。
 >
-> ~~`settings` 包含 `jwt_secret`。~~ **2026-07-26 修订**：后端会从返回对象中剔除 `jwt_secret`；其他敏感值（如密码哈希、Cloudflare Token、Turnstile Secret）仍可能存在，必须使用 HTTPS 并限制管理 Token。
+> ~~`settings` 包含 `jwt_secret`。~~ **2026-09-19 修订**：后端会从返回对象中剔除 `jwt_secret`、`password` 和 GitHub Client Secret；其他敏感值（如 Cloudflare Token、Turnstile Secret）仍可能存在，必须使用 HTTPS 并限制管理 Token。
 
 ***
 
@@ -1323,6 +1340,10 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled` 或
     "custom_cu": "gd-cu-dualstack.ip.zstaticcdn.com",
     "custom_cm": "gd-cm-dualstack.ip.zstaticcdn.com",
     "custom_bd": "ip.zstaticcdn.com",
+    "custom_ct_name": "电信",
+    "custom_cu_name": "联通",
+    "custom_cm_name": "移动",
+    "custom_bd_name": "BGP",
     "expire_reminder": "0"
   }
 }
@@ -1331,7 +1352,7 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled` 或
 **字段分类**：
 
 - `APPEARANCE_FIELDS`（写入 `appearance_options` JSON）：`site_title`、`custom_bg`、`custom_bg_mobile`、`favicon`、`custom_head`、`custom_script`、`csp_static`、`csp_api`、`display_mode`、`preferred_theme`、`default_language`、`theme_options`
-- `SITE_FIELDS`（写入 `site_options` JSON）：`is_public`、`show_price`、`show_expire`、`show_tf`、`wss_report_enabled`、`wss_report_hours`、`frontend_ws_timeout_minutes`、`long_history_points`、通知、Turnstile、账号、Cloudflare、Ping 节点、`expire_reminder`、`notification_timezone`、`expire_notification_time`、`theme_url`、历史优化字段等站点级配置。`wss_report_hours` 是允许 Agent WSS 上报的 UTC 小时数组（`0-23`）；缺失时默认全天，空数组表示所有时段均关闭
+- `SITE_FIELDS`（写入 `site_options` JSON）：`is_public`、`show_price`、`show_expire`、`show_tf`、`wss_report_enabled`、`wss_report_hours`、`frontend_ws_timeout_minutes`、`long_history_points`、通知、Turnstile、账号、Cloudflare、Ping 节点及其显示名称（`custom_ct_name`、`custom_cu_name`、`custom_cm_name`、`custom_bd_name`）、`expire_reminder`、`notification_timezone`、`expire_notification_time`、`theme_url`、历史优化字段等站点级配置。`wss_report_hours` 是允许 Agent WSS 上报的 UTC 小时数组（`0-23`）；缺失时默认全天，空数组表示所有时段均关闭
 - 任何未列出的字段会被忽略
 
 **特殊处理**：
@@ -1340,7 +1361,7 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled` 或
 - `theme_url`：可单独通过 `{"settings":{"theme_url":"..."}}` 保存；允许 `https://github.com/<owner>/<repo>/tree/<commit-or-branch>[/theme-subdir]` 格式。保存前会请求对应 raw `index.html` 验证可用性，失败返回 `400 invalidThemeUrl`，不会保存
 - Ping 节点字段：仅校验本次请求中出现的 `custom_ct/custom_cu/custom_cm/custom_bd` 字段，因此只保存 `theme_url` 不会触发 Ping 节点格式校验
 - Turnstile：本次请求把 `turnstile_enabled` 或 `turnstile_login_enabled` 设为 `true` 时，必须同时提供非空 `turnstile_site_key` 与 `turnstile_secret_key`
-- 通知：规范化后的 `tg_notify` 非 `0`，或 `expire_reminder` 为 `1`-`7` 时，必须提供非空 `tg_bot_token`
+- 通知：规范化后的 `tg_notify` 非 `0`，或 `expire_reminder` 为 `1`-`365` 时，必须提供非空 `tg_bot_token`
 - `notification_timezone`：通知输出时间和到期提醒计划使用的 IANA 时区；缺失或非法值回退为 `UTC`
 - `expire_notification_time`：到期提醒每天在通知时区内执行的小时，取值 `0`-`23`；缺失或非法值回退为 `12`
 - `appearance_options` / `theme_options`：必须是非数组对象；`display_mode` 规范为 `bar` / `ring` / `table`；`preferred_theme` 规范为 `auto` / `dark` / `light`，默认 `auto`；`default_language` 规范为 `auto` / `zh` / `en`，默认 `auto`
@@ -1819,8 +1840,8 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
 | `processes`                                   | number             | 进程数                       |
 | `tcp_conn`                                    | number             | TCP 连接数                   |
 | `udp_conn`                                    | number             | UDP 套接字数                  |
-| `ping_ct` / `ping_cu` / `ping_cm` / `ping_bd` | number\|null\|false | 各运营商延时 (ms)；`false` 表示禁用该节点 |
-| `loss_ct` / `loss_cu` / `loss_cm` / `loss_bd` | number\|null\|false | 各运营商丢包率 (%)；`false` 表示禁用该节点 |
+| `ping_ct` / `ping_cu` / `ping_cm` / `ping_bd` / `ping_node_1` 至 `ping_node_4` | number\|null\|false | 各运营商及自定义节点延时 (ms)；`false` 表示未配置/未上报/未取样（不显示），`null` 表示该轮超时/未取到有效 RTT（显示 Timeout） |
+| `loss_ct` / `loss_cu` / `loss_cm` / `loss_bd` / `loss_node_1` 至 `loss_node_4` | number\|null\|false | 各运营商及自定义节点丢包率 (%)；`false` 表示未配置/未上报/未取样（不显示），`null` 表示没有丢包样本，`0`–`100` 是有效值，`100` 配合对应 `ping_*` 的 `null` 表示全超时 |
 | `ping` / `loss`                               | array              | 仅 `/api/servers` 的 `servers[]` 列表项返回，`/api/server` 详情接口不返回；后台开启三网详情时，从 D1 最近 2 小时历史按时间范围抽样最多 20 个真实样本点，当前 Worker isolate 内缓存约 5 分钟；关闭三网详情时为空数组且不触发这部分 D1 查询。点格式为 `{ ts, ct, cu, cm, bd }`，`ct/cu/cm/bd` 分别对应电信、联通、移动、BGP。`ts` 为真实上报时间，不强制等差对齐，也不会用最近点补齐缺口 |
 | `ram_total` / `ram_used`                      | number             | MB                        |
 | `swap_total` / `swap_used`                    | number             | MB                        |
@@ -1850,7 +1871,7 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
 | 字段          | 类型             | 说明 |
 | ----------- | -------------- | ---- |
 | `timestamp` | number (ms)    | 采样时间 |
-| 其余字段        | number\|string\|null | 当前 `/api/history/all` 固定返回：`cpu, gpu_info, ram_total, ram_used, disk_total, disk_used, disk_read_bps, disk_write_bps, disk_read_iops, disk_write_iops, disk_await_ms, disk_util, processes, net_in_speed, net_out_speed, tcp_conn, udp_conn, ping_ct, ping_cu, ping_cm, ping_bd, loss_ct, loss_cu, loss_cm, loss_bd, swap_total, swap_used, load_avg, region, kernel_version`；其中 `gpu_info` 通常是 JSON 数组字符串，`disk` 仅在 `disk_*` 历史列存在有效数据时由服务端还原 |
+| 其余字段        | number\|string\|null | 当前 `/api/history/all` 固定返回：`cpu, gpu_info, ram_total, ram_used, disk_total, disk_used, disk_read_bps, disk_write_bps, disk_read_iops, disk_write_iops, disk_await_ms, disk_util, processes, net_in_speed, net_out_speed, tcp_conn, udp_conn, ping_ct, ping_cu, ping_cm, ping_bd, ping_node_1, ping_node_2, ping_node_3, ping_node_4, loss_ct, loss_cu, loss_cm, loss_bd, loss_node_1, loss_node_2, loss_node_3, loss_node_4, swap_total, swap_used, load_avg, region, kernel_version`；其中 `gpu_info` 通常是 JSON 数组字符串，`disk` 仅在 `disk_*` 历史列存在有效数据时由服务端还原 |
 
 历史行不包含单独的 `gpu` 字段，只包含 `gpu_info`。
 
@@ -1885,14 +1906,14 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
   turnstile_site_key: string,
   turnstile_secret_key: string,
   username: string,
-  password: string,              // PBKDF2 哈希值；旧版 MD5 哈希会在成功登录后自动升级
+  password: string,              // PBKDF2 哈希值；旧版 MD5 哈希会在成功登录后自动升级；get_settings 不返回此字段
   cloudflare_account_id: string,
   cloudflare_token: string,
   custom_ct: string,             // 电信测速节点 host[:port]
   custom_cu: string,             // 联通 host[:port]
   custom_cm: string,             // 移动 host[:port]
   custom_bd: string,             // BGP host[:port]
-  expire_reminder: '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7',
+  expire_reminder: string, // '0'-'365'; 0 disables expiration reminders
   notification_timezone: string, // IANA timezone；默认 UTC
   expire_notification_time: string, // '0'-'23'；默认 12
   history_id_optimized: 'true' | 'false',
@@ -1926,10 +1947,11 @@ Worker 同时注册了 cron 触发器（`scheduled` handler），可在 `wrangle
 
 | Cron          | 行为              | 备注                                                             |
 | ------------- | --------------- | -------------------------------------------------------------- |
-| `*/1 * * * *` | 每分钟：检测离线节点、资源告警 | `checkOfflineNodes`、`checkResourceAlerts`（通知） |
+| `*/1 * * * *` | 每分钟：检测离线节点、资源告警并投递通知任务 | `checkOfflineNodes`、`checkResourceAlerts`；失败任务按退避时间重试 |
 | `0 * * * *`   | 每小时：根据 UTC 日期分支 | 见下表                                                            |
-| <br />        | 每周日 0 点：表轮换    | `weeklyCleanup`（删除旧表、重命名 metrics\_history → metrics\_history\_old、创建新表） |
 | <br />        | 每小时按通知时区/到期提醒时间判断是否执行到期检测 | `checkExpiringServers` |
+| <br />        | 到期检测后按通知时区生成日/周/月流量报告 | `checkTrafficReports`；使用业务周期键去重 |
+| <br />        | 每周日 0 点：完成通知任务生成后再执行表轮换 | `weeklyCleanup`（删除旧表、重命名 metrics\_history → metrics\_history\_old、创建新表） |
 
 每周日 00:00–00:04 UTC 的表轮换窗口内，分钟任务会跳过离线节点检测。
 
@@ -2156,6 +2178,7 @@ curl -X POST https://status.example.com/admin/api \
 
 ## 9. 版本与变更说明
 
+- **2026-09-07**：统一 Ping/丢包取值约定并与 WSS 对齐：`false` / 字段缺失表示未配置、未上报或未取样（前端不显示）；`null` 表示该轮探测超时/未取到有效 RTT（前端显示 Timeout）。历史接口读取旧数据时按同行的 `loss=100` 归位，不再把“未上报”误显示成超时。
 - **2026-08-20**：新增 `frontend_ws_timeout_minutes` 站点设置与 `/api/config` 字段；默认 `0` 不超时，正整数表示前端实时订阅连接的分钟级寿命上限。
 - **2026-07-26**：重新同步 `main` 源码；当前 Workers 版本为 `2.8.0 Beta`，Agent 版本为 `1.3.2`。补充主题商店、主题代理、最新批次缓存、测试通知、服务器导入/导出及探针动态配置，修正鉴权、历史查询、WebSocket、数据库维护和数据结构说明。
 - ~~**v1.x**：当前文档对应早期 `src/index.js`、`src/handlers/*`、`src/database/schema.js` 主线实现。~~ **2026-07-26 修订**：文档现以 `2.8.0 Beta` 的 `main` 分支实现为准。
