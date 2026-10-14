@@ -87,15 +87,9 @@
                   <OsIcon :os="server.os" />
                 </span>
                 <a
-                  v-if="themeUrl"
-                  :href="getPublicServerHref(server)"
+                  :href="getServerDetailHref(server)"
                   class="server-name-link"
                 >{{ server.name }}</a>
-                <router-link
-                  v-else
-                  :to="getDefaultServerRoute(server)"
-                  class="server-name-link"
-                >{{ server.name }}</router-link>
               </div>
             </td>
             <td>
@@ -108,7 +102,7 @@
                   :key="ipItem.copyField"
                   class="server-ip-line"
                   :class="{ 'spec-copied': isSpecCopied(server, ipItem.copyField) }"
-                  @dblclick.stop="emitCopySpec(server, ipItem.copyField, ipItem.address)"
+                  @click.stop="emitCopySpec(server, ipItem.copyField, ipItem.address)"
                 >
                   <span class="server-ip-value">{{ ipItem.address }}</span>
                 </span>
@@ -126,36 +120,34 @@
               <span
                 class="note-text"
                 :class="{ 'note-copied': copiedNoteServerId === server.id }"
-                @dblclick.stop="$emit('copy-note', server)"
+                @click.stop="$emit('copy-note', server)"
               >{{ server.note || '-' }}</span>
             </td>
             <td>
               <span
                 class="spec-text"
                 :class="{ 'spec-copied': isSpecCopied(server, 'price') }"
-                @dblclick.stop="emitCopySpec(server, 'price', formatServerPrice(server))"
+                @click.stop="emitCopySpec(server, 'price', formatServerPrice(server))"
               >{{ formatServerPrice(server) }}</span>
             </td>
             <td><span class="date-text">{{ server.expire_date || '-' }}</span></td>
             <td>
               <span
-                class="spec-text"
-                :class="{ 'spec-copied': isSpecCopied(server, 'auto_renewal') }"
-                @dblclick.stop="emitCopySpec(server, 'auto_renewal', isServerAutoRenewal(server) ? trans.enabled : trans.disabled)"
+                class="renewal-text"
               >{{ isServerAutoRenewal(server) ? trans.enabled : trans.disabled }}</span>
             </td>
             <td>
               <span
                 class="spec-text"
                 :class="{ 'spec-copied': isSpecCopied(server, 'traffic_limit') }"
-                @dblclick.stop="emitCopySpec(server, 'traffic_limit', server.traffic_limit ? formatBytes(server.traffic_limit * 1024 * 1024 * 1024) : '')"
+                @click.stop="emitCopySpec(server, 'traffic_limit', server.traffic_limit ? formatBytes(server.traffic_limit * 1024 * 1024 * 1024) : '')"
               >{{ server.traffic_limit ? formatBytes(server.traffic_limit * 1024 * 1024 * 1024) : '-' }}</span>
             </td>
             <td>
               <span
                 class="spec-text"
                 :class="[getAgentVersionClass(server.agent_version), { 'spec-copied': isSpecCopied(server, 'agent_version') }]"
-                @dblclick.stop="emitCopySpec(server, 'agent_version', server.agent_version)"
+                @click.stop="emitCopySpec(server, 'agent_version', server.agent_version)"
               >{{ server.agent_version || '●' }}</span>
             </td>
             <td>
@@ -193,7 +185,6 @@ const props = defineProps({
   groups: { type: Array, default: () => ['Default'] },
   activeTab: { type: String, default: 'servers' },
   selectedApiIndex: { type: Number, default: 0 },
-  themeUrl: { type: String, default: '' },
   latestAgentVersion: { type: String, default: '' },
   copiedServerId: { type: [String, Number], default: null },
   copiedNoteServerId: { type: [String, Number], default: null },
@@ -477,6 +468,6 @@ const getAgentVersionClass = (version) => {
   return normalizeVersion(version) === latest ? 'text-green' : 'text-red'
 }
 const getServerQuery = () => props.selectedApiIndex ? `?apiIndex=${props.selectedApiIndex}` : ''
-const getDefaultServerRoute = (server) => `/server/${server.id}${getServerQuery()}`
-const getPublicServerHref = (server) => `/#/server/${encodeURIComponent(server.id)}${getServerQuery()}`
+// 详情页是公开页面，走域名根路径入口 /#/server/:id
+const getServerDetailHref = (server) => `/#/server/${encodeURIComponent(server.id)}${getServerQuery()}`
 </script>

@@ -119,15 +119,14 @@ export async function generateToken(env, sys) {
 }
 
 export async function checkAuth(request, env, sys) {
-  return verifyToken(extractBearerToken(request), env, sys);
+  if (await verifyToken(extractBearerToken(request), env, sys)) {
+    return true;
+  }
+  return verifyToken(getCookieValue(request, AUTH_COOKIE_NAME), env, sys);
 }
 
 export async function checkWebSocketAuth(request, env, sys) {
   if (await checkAuth(request, env, sys)) {
-    return true;
-  }
-
-  if (await verifyToken(getCookieValue(request, AUTH_COOKIE_NAME), env, sys)) {
     return true;
   }
 
@@ -156,36 +155,8 @@ export function buildClearAuthCookie(request) {
   return `${AUTH_COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax${secure}`;
 }
 
-export async function validateCredentials(request, env, sys) {
+export async function validateCredentials(username, password, env, sys) {
   try {
-    const authHeader = request.headers.get('Authorization');
-    if (!authHeader) {
-      return { valid: false, needsPasswordUpgrade: false };
-    }
-
-    const parts = authHeader.trim().split(/\s+/);
-    const scheme = parts[0];
-    const encoded = parts[1];
-
-    if (scheme !== 'Basic' || !encoded) {
-      return { valid: false, needsPasswordUpgrade: false };
-    }
-
-    let decoded;
-    try {
-      decoded = atob(encoded);
-    } catch (e) {
-      return { valid: false, needsPasswordUpgrade: false };
-    }
-
-    const idx = decoded.indexOf(':');
-    if (idx === -1) {
-      return { valid: false, needsPasswordUpgrade: false };
-    }
-
-    const username = decoded.slice(0, idx);
-    const password = decoded.slice(idx + 1);
-
     const validUsername = (sys && sys.username && sys.username.length > 0)
       ? sys.username
       : (typeof env.API_USER_NAME === 'string' && env.API_USER_NAME.length > 0)
