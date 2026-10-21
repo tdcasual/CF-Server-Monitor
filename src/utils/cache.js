@@ -73,6 +73,13 @@ export function clearServerDetailCache() {
   serverDetailCache.clear();
 }
 
+// 按 id 就地打补丁更新已缓存的服务器详情字段（不创建条目、不清全表）
+// 用于运行时状态列（如 traffic_alert_state）写回后刷新缓存，避免 TTL 内读到旧值重复触发。
+export function patchServerDetailCache(id, fields) {
+  const entry = serverDetailCache.get(id);
+  if (entry && entry.data) Object.assign(entry.data, fields);
+}
+
 export async function getServerDetail(db, id, includeHidden = false) {
   const now = Date.now();
   const cached = serverDetailCache.get(id);
@@ -96,10 +103,22 @@ export async function getServerDetail(db, id, includeHidden = false) {
     serverDetailCache.delete(id);
   }
   
-  const server = await db.prepare('SELECT * FROM servers WHERE id = ?').bind(id).first();
+  let server;
+  let degraded = false;
+  try {
+    server = await db.prepare('SELECT * FROM servers WHERE id = ?').bind(id).first();
+  } catch (e) {
+    // 与 getAllServers 一致：D1 异常时回退上一次已知结果，不把基础设施抖动放大成业务失败。
+    if (!cached) throw e;
+    debug('服务器详情查询失败，回退缓存值:', e);
+    server = cached.data;
+    degraded = true;
+  }
 
-  serverDetailCache.set(id, { data: server, time: now });
-  debug('服务器详情缓存更新');
+  if (!degraded) {
+    serverDetailCache.set(id, { data: server, time: now });
+    debug('服务器详情缓存更新');
+  }
   
   if (!server) {
     return null;
