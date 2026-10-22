@@ -1,12 +1,13 @@
 import { saveMetricsHistory } from '../database/schema.js';
-import { getServerDetail, clearServerDetailCache } from '../utils/cache.js';
+import { getServerDetail, clearServerDetailCache, patchServerDetailCache } from '../utils/cache.js';
+import { evaluateTrafficAlert } from '../services/notification.js';
 import {
   DISK_IO_FIELD_TO_COLUMN,
   DISK_IO_METRIC_FIELDS,
   mergeMetricsIntoServer,
   coerceNumericMetricFields
 } from '../utils/metrics.js';
-import { createErrorResponse, createUnauthorizedResponse, createNotFoundResponse, createBadRequestResponse } from '../utils/errors.js';
+import { createErrorResponse, createUnauthorizedResponse, createBadRequestResponse } from '../utils/errors.js';
 import { ensureServerOptimization } from '../database/indexOptimization.js';
 import { getResourceAlertConfig, getWssReportScheduleState, isWssReportConfigured, loadSiteSettings, normalizeBooleanSetting } from '../utils/settings.js';
 import { cacheLatestReportUpdate } from '../utils/latestReportCache.js';
@@ -31,6 +32,7 @@ import {
 import {
   UPDATE_FRONTEND_SUBSCRIBER_CHECK_INTERVAL_MS,
   UPDATE_MAX_BATCH_SAMPLES,
+  UPDATE_MAX_REQUEST_BYTES,
   UPDATE_REALTIME_BATCH_WINDOW_MS,
   UPDATE_RESOURCE_ALERT_BATCH_WINDOW_MS
 } from '../utils/config.js';
@@ -55,6 +57,7 @@ const DISK_IO_COLUMN_TO_FIELD = Object.freeze(Object.fromEntries(
 const AGENT_WSS_MODE_HEADER = 'X-Agent-Wss-Mode';
 const AGENT_WSS_REASON_HEADER = 'X-Agent-Wss-Reason';
 const AGENT_WSS_SCHEDULE_INACTIVE = 'wss_schedule_inactive';
+const AGENT_WSS_SCHEDULE_DISABLED = 'wss_disabled';
 let batchQueue = new Map();
 let flushingPromise = null;
 let flushTimer = null;
@@ -80,6 +83,49 @@ function logUpdateBadRequest(reason, details = {}) {
   console.warn('[Update] 400 Bad Request:', reason, details);
 }
 
+function getDeclaredContentLength(request) {
+  const raw = request.headers.get('Content-Length');
+  if (!raw) return null;
+  const length = Number(raw);
+  return Number.isFinite(length) && length >= 0 ? length : null;
+}
+
+function createPayloadTooLargeResponse() {
+  return new Response(JSON.stringify({
+    error: 'Payload too large',
+    code: 413,
+    text: 'payload_too_large'
+  }), {
+    status: 413,
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+      'X-CFSM-Agent-Status': 'payload_too_large',
+      // 与 Agent 的 wssProtocolRetryDelay（120s）保持一致；当前 Agent 尚未读取该头，仅作后续兼容。
+      'Retry-After': '120'
+    }
+  });
+}
+
+// 保持 404 兼容旧版 Agent：Agent 的 isAuthConfigHTTPStatus 只认 401/403/404，
+// 改 410 会让 WSS 失去 120s 协议退避。
+function createServerNotFoundResponse() {
+  return new Response(JSON.stringify({
+    error: 'Server not found',
+    code: 404,
+    text: 'server_not_found'
+  }), {
+    status: 404,
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+      'X-CFSM-Agent-Status': 'server_not_found',
+      // 服务器已删除：让 Agent 退避更久（300s），减少僵尸 Agent 的无效请求。
+      'Retry-After': '300'
+    }
+  });
+}
+
 export function normalizeCorrectionValue(value) {
   if (value === null || value === undefined || value === '') return 0;
   return isValidTrafficCorrection(value) ? Number(value) : null;
@@ -91,7 +137,17 @@ export function normalizeMetricSamples(data) {
     ? data.samples
     : (Array.isArray(data.batch) ? data.batch : []);
 
-  const samples = rawSamples.map(item => {
+  // Agent 按时间顺序追加样本；确认递增时才预截断，避免超大数组在服务端做全量 map/sort。
+  // 乱序输入不预截断，交给末尾的 sort + slice 兜底，避免丢掉最新样本。
+  const sampleTs = item => Number(item?.ts ?? item?.timestamp ?? item?.metrics?.timestamp);
+  const firstTs = sampleTs(rawSamples[0]);
+  const lastTs = sampleTs(rawSamples[rawSamples.length - 1]);
+  const chronological = Number.isFinite(firstTs) && Number.isFinite(lastTs) && firstTs <= lastTs;
+  const boundedSamples = chronological && rawSamples.length > UPDATE_MAX_BATCH_SAMPLES
+    ? rawSamples.slice(-UPDATE_MAX_BATCH_SAMPLES)
+    : rawSamples;
+
+  const samples = boundedSamples.map(item => {
     if (!item || typeof item !== 'object') return null;
     const metrics = item.metrics || item.data || item.payload || item;
     if (!metrics || typeof metrics !== 'object') return null;
@@ -403,6 +459,23 @@ function createAgentWssScheduleInactiveResponse(settings = {}) {
   });
 }
 
+function createAgentWssDisabledResponse() {
+  return new Response(JSON.stringify({
+    error: 'Agent WSS report disabled',
+    code: 409,
+    text: AGENT_WSS_SCHEDULE_DISABLED,
+    connection_mode: 'http'
+  }), {
+    status: 409,
+    headers: {
+      'Cache-Control': 'no-store',
+      'Content-Type': 'application/json',
+      [AGENT_WSS_MODE_HEADER]: 'disabled',
+      [AGENT_WSS_REASON_HEADER]: AGENT_WSS_SCHEDULE_DISABLED
+    }
+  });
+}
+
 async function _flushBatch(env) {
   if (batchQueue.size === 0) return;
 
@@ -487,6 +560,17 @@ function _ensureBatchFlush(env) {
 
 export async function handleUpdate(request, env, ctx) {
   try {
+    // 必须在 request.json() 之前：超大 body 的解析本身就可能耗尽 Worker CPU。
+    // 注意这是防呆而非硬上限：chunked 或缺少 Content-Length 的请求会跳过该检查。
+    const declaredLength = getDeclaredContentLength(request);
+    if (declaredLength !== null && declaredLength > UPDATE_MAX_REQUEST_BYTES) {
+      console.warn('[Update] 413 Payload too large:', {
+        content_length: declaredLength,
+        limit: UPDATE_MAX_REQUEST_BYTES
+      });
+      return createPayloadTooLargeResponse();
+    }
+
     const data = await request.json();
     const { id, secret } = data;
 
@@ -500,7 +584,7 @@ export async function handleUpdate(request, env, ctx) {
     const serverDetail = await getServerDetail(env.DB, id, true);
 
     if (!serverDetail) {
-      return createNotFoundResponse('Server not found');
+      return createServerNotFoundResponse();
     }
 
     if (
@@ -571,6 +655,10 @@ export async function handleUpdate(request, env, ctx) {
     // 加入批量队列，由后台定时任务统一推送到 DO
     queueBroadcastSamples(id, broadcastSamples);
     ctx.waitUntil(_ensureBatchFlush(env));
+    // 月流量阈值告警：复用已加载的 serverDetail 与刚入库的 historyMetrics，非阻塞后台执行
+    ctx.waitUntil(evaluateTrafficAlert(env, serverDetail, historyMetrics, {
+      patchCache: (serverId, value) => patchServerDetailCache(serverId, { traffic_alert_state: value })
+    }));
 
     const clientConfigSchema = normalizeAgentConfigSchemaVersion(request.headers.get(AGENT_CONFIG_SCHEMA_HEADER));
     if (!clientConfigSchema) {
@@ -685,10 +773,7 @@ export async function handleWebSocketUpgrade(request, env) {
 export async function handleUpdateWebSocketUpgrade(request, env) {
   const settings = await loadSiteSettings(env.DB);
   if (!isWssReportConfigured(settings)) {
-    return new Response(JSON.stringify({ error: 'Agent WSS report disabled', code: 403 }), {
-      status: 403,
-      headers: { 'Content-Type': 'application/json' }
-    });
+    return createAgentWssDisabledResponse();
   }
   const scheduleState = getWssReportScheduleState(settings);
   if (!scheduleState.active) {
