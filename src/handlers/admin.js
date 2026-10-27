@@ -1,19 +1,21 @@
 import { buildAuthCookie, buildClearAuthCookie, checkAuth, simpleAuthResponse, validateCredentials, generateToken } from '../middleware/auth.js';
 import { getLatestMetricsForAllServers } from '../database/schema.js';
 import { getAllServers, clearServersListCache } from '../utils/cache.js';
-import { clearAppearanceSettingsCache, isValidThemeOptions, isWssReportConfigured, isWssReportEnabled, normalizeBooleanSetting, normalizeDefaultLanguage, normalizeDisplayMode, normalizeExpireNotificationTime, normalizeExpireReminder, normalizeFrontendWsTimeoutMinutes, normalizeLongHistoryPoints, normalizeNotificationTemplate, normalizeNotificationTimezone, normalizeNotificationWebhookBody, normalizeNotificationWebhookFormat, normalizeNotificationWebhookHeaders, normalizeNotificationWebhookMethod, normalizePreferredTheme, normalizeResourceAlertRules, normalizeTgNotify, normalizeWssReportHours, saveSiteOptions, saveThemeOptions, SITE_FIELDS, APPEARANCE_FIELDS } from '../utils/settings.js';
+import { clearAppearanceSettingsCache, isValidThemeOptions, isWssReportConfigured, isWssReportEnabled, normalizeBooleanSetting, normalizeDefaultLanguage, normalizeDisplayMode, normalizeExpireNotificationTime, normalizeExpireReminder, normalizeFrontendWsTimeoutMinutes, normalizeLongHistoryPoints, normalizeNotificationLanguage, normalizeNotificationTemplate, normalizeNotificationTimezone, normalizeNotificationWebhookBody, normalizeNotificationWebhookFormat, normalizeNotificationWebhookHeaders, normalizeNotificationWebhookMethod, normalizePreferredTheme, normalizeResourceAlertRules, normalizeTgNotify, normalizeWssReportHours, saveSiteOptions, saveThemeOptions, SITE_FIELDS, APPEARANCE_FIELDS } from '../utils/settings.js';
 import { mergeMetricsIntoServer } from '../utils/metrics.js';
+import { normalizePctOrNull } from '../utils/traffic.js';
 import { verifyTurnstileToken, hashPassword } from '../utils/common.js';
 import { AppError, createSuccessResponse, createBadRequestResponse, createUnauthorizedResponse, createErrorResponse } from '../utils/errors.js';
 import { addServerColumns } from '../database/updateDatabase.js';
-import { clearResourceAlertState, sendNotification } from '../services/notification.js';
+import { clearResourceAlertState, isSmtpNotificationTarget, sendNotification } from '../services/notification.js';
+import { getNotificationMessages } from '../services/notificationMessages.js';
 import { getNextServerHistoryPartitionId, HISTORY_MAX_PARTITION_ID } from '../database/indexOptimization.js';
 import { isValidTrafficCorrection, normalizeConnectionMode, normalizePingMode, normalizeWssReportInterval, validateAgentConfigInput, validatePingNode, validateNetworkInterfaces } from '../utils/agentConfig.js';
 import { scheduleAgentConfigChanged, scheduleAgentReportModeChanged } from '../utils/agentConfigNotify.js';
 import { detectBillingCycle, detectCurrencySymbol, normalizeBillingCycle, normalizeCurrency, normalizePrice, renewExpireDateIfNeeded } from '../utils/serverBilling.js';
 import { THEME_PREVIEW_AUTH_TTL_SECONDS } from '../utils/config.js';
 
-const PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd'];
+const PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', 'node_1', 'node_2', 'node_3', 'node_4'];
 const THEME_PREVIEW_AUTH_COOKIE = 'cfsm_theme_preview_auth';
 const DURABLE_OBJECTS_WEBSOCKET_MESSAGE_BILLING_RATIO = 20;
 
@@ -106,13 +108,18 @@ function normalizePingNodeFields(source, fields = PING_NODE_FIELDS) {
   const values = {};
   for (const field of fields) {
     if (source?.[field] === undefined) continue;
-    const result = validatePingNode(source?.[field]);
+    const result = validatePingNode(source[field]);
     if (!result.valid) {
       return { valid: false, field };
     }
-    values[field] = result.value;
+    // Keep the disabled-node sentinel as text so D1 does not coerce it to 0.0 in TEXT columns.
+    values[field] = source[field] === 0 || source[field] === '0' ? '0' : result.value;
   }
   return { valid: true, values };
+}
+
+function normalizeImportedPingNodeValue(value) {
+  return value === null || value === undefined ? '' : value;
 }
 
 function normalizeNetworkInterfaceField(value) {
@@ -475,14 +482,7 @@ async function handleLoginAction({ request, env, sys, data }) {
     }
   }
 
-  const authHeader = 'Basic ' + btoa(username + ':' + password);
-  const mockRequest = {
-    headers: {
-      get: (key) => key === 'Authorization' ? authHeader : null
-    }
-  };
-
-  const credentialResult = await validateCredentials(mockRequest, env, sys);
+  const credentialResult = await validateCredentials(username, password, env, sys);
 
   if (!credentialResult.valid) {
     return createUnauthorizedResponse('invalidCredentials');
@@ -537,12 +537,19 @@ const PUBLIC_ADMIN_ACTION_HANDLERS = {
   clear_theme_preview_auth: handleClearThemePreviewAuthAction
 };
 
+export function sanitizeAdminSettings(fullSettings = {}) {
+  const { jwt_secret, password, ...safeSettings } = fullSettings || {};
+  return {
+    ...safeSettings,
+    password_configured: Boolean(String(password || '').trim())
+  };
+}
+
 async function handleGetSettingsAction({ env, sys, loadFullSettings }) {
   const fullSettings = loadFullSettings ? await loadFullSettings() : sys;
-  const { jwt_secret, ...safeSettings } = fullSettings || {};
   return createSuccessResponse({
     success: true,
-    settings: safeSettings,
+    settings: sanitizeAdminSettings(fullSettings),
     api_secret: env.API_SECRET
   });
 }
@@ -587,7 +594,12 @@ async function handleSaveThemeOptionsAction({ env, sys, data }) {
   });
 }
 
-async function handleListAction({ env }) {
+async function handleListAction({ env, data }) {
+  // 管理后台「刷新缓存」会带 refresh: true，跳过本 isolate 的 120 秒列表缓存直接读 D1
+  if (data?.refresh === true) {
+    clearServersListCache();
+  }
+
   const servers = await getAllServers(env.DB);
   const latestMetricsMap = await getLatestMetricsForAllServers(env.DB);
 
@@ -681,6 +693,7 @@ async function handleSendTestNotificationAction({ data }) {
     notification_webhook_body,
     notification_template,
     notification_timezone,
+    notification_language,
     expire_notification_time
   } = data;
   const webhookEnabled = normalizeBooleanSetting(notification_webhook_enabled) === 'true';
@@ -688,11 +701,14 @@ async function handleSendTestNotificationAction({ data }) {
     if (!notification_webhook_url || String(notification_webhook_url).trim().length === 0) {
       return createBadRequestResponse('notificationWebhookUrlRequired');
     }
+  } else if (isSmtpNotificationTarget(tg_bot_token)) {
+    // SMTP 邮件渠道（smtp:// 前缀）视为有效的内置通知目标
   } else if (!tg_bot_token || tg_bot_token.trim().length === 0) {
     return createBadRequestResponse('tgBotTokenRequired');
   }
   try {
-    const testMsg = '这是一条来自 CF Server Monitor 的测试消息。';
+    const notificationLanguage = normalizeNotificationLanguage(notification_language);
+    const messages = getNotificationMessages({ notification_language: notificationLanguage });
     const result = await sendNotification({
       tg_bot_token,
       tg_chat_id: tg_chat_id || '',
@@ -704,21 +720,23 @@ async function handleSendTestNotificationAction({ data }) {
       notification_webhook_body: normalizeNotificationWebhookBody(notification_webhook_body),
       notification_template: normalizeNotificationTemplate(notification_template),
       notification_timezone: normalizeNotificationTimezone(notification_timezone),
+      notification_language: notificationLanguage,
       expire_notification_time: normalizeExpireNotificationTime(expire_notification_time)
-    }, testMsg, {
-      event: '测试通知',
+    }, messages.testMessage, {
+      event: messages.events.test,
       emoji: '✅',
       clients: ['CF Server Monitor'],
       count: 1,
-      message: '这是一条来自 CF Server Monitor 的测试消息。'
+      message: messages.testMessage
     });
     if(result) {
       console.warn('Test notification failed:', result);
-      return createBadRequestResponse('testNotificationFailed');
+      // 附带具体失败原因，前端 i18n 未命中时会原样展示（不含密码等敏感信息）
+      return createBadRequestResponse(`testNotificationFailed: ${result}`);
     }
     return createSuccessResponse({ success: true, message: 'testNotificationSent' });
   } catch (e) {
-    return createBadRequestResponse('testNotificationFailed');
+    return createBadRequestResponse(`testNotificationFailed: ${e?.message || e}`);
   }
 }
 
@@ -751,6 +769,9 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
 
     if (data.action === 'save_settings') {
       const settings = data.settings || {};
+      if (!String(sys?.password || '').trim() && !String(settings.password || '')) {
+        return createBadRequestResponse('passwordRequired');
+      }
       const normalizedThemeUrl = normalizeThemeUrl(settings.theme_url);
       if (normalizedThemeUrl === null) {
         return createBadRequestResponse('invalidThemeUrl');
@@ -796,6 +817,8 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
           if (!effectiveWebhookUrl || String(effectiveWebhookUrl).trim().length === 0) {
             return createBadRequestResponse('notificationWebhookUrlRequired');
           }
+        } else if (isSmtpNotificationTarget(effectiveTgBotToken)) {
+          // SMTP 邮件渠道（smtp:// 前缀）视为有效的内置通知目标，允许通过告警门槛校验
         } else if (!effectiveTgBotToken || String(effectiveTgBotToken).trim().length === 0) {
           return createBadRequestResponse('tgBotTokenRequired');
         }
@@ -870,10 +893,14 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
             siteOptions[field] = normalizeBooleanSetting(settings[field]);
           } else if (field === 'wss_report_hours') {
             siteOptions[field] = normalizeWssReportHours(settings[field]);
+          } else if (field === 'auto_discovery') {
+            siteOptions[field] = normalizeBooleanSetting(settings[field]);
           } else if (field === 'show_three_net_details') {
             siteOptions[field] = normalizeBooleanSetting(settings[field]);
           } else if (field === 'notification_timezone') {
             siteOptions[field] = normalizeNotificationTimezone(settings[field]);
+          } else if (field === 'notification_language') {
+            siteOptions[field] = normalizeNotificationLanguage(settings[field]);
           } else if (field === 'expire_notification_time') {
             siteOptions[field] = normalizeExpireNotificationTime(settings[field]);
           } else if (field === 'notification_webhook_enabled') {
@@ -896,6 +923,13 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
         }
       }
       await saveSiteOptions(env.DB, siteOptions);
+      // 保存设置后非致命补列：确保 servers 表的告警相关列存在，避免启用月流量阈值后
+      // 告警状态因缺列无法持久化而重复发送通知。设置已保存成功，补列失败不回滚、不报错。
+      try {
+        await addServerColumns(env.DB);
+      } catch (e) {
+        console.error('[settings-save] 保存设置后补列失败:', e);
+      }
       const shouldCloseAgentWssReports = !isWssReportEnabled({ ...sys, ...siteOptions });
       // Keep existing states on rule edits so threshold increases can emit recovery notifications.
       // checkResourceAlerts prunes states for removed rules or servers on the next evaluation.
@@ -987,7 +1021,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
       });
     }
     else if (data.action === 'edit') {
-      const { id, name, server_group, region, tags, note, price, billing_cycle, auto_renewal, currency, expire_date, traffic_limit, traffic_calc_type, interface: networkInterfaceInput, reset_day, collect_interval, report_interval, wss_report_interval, connection_mode, ping_mode, auto_update, custom_ct, custom_cu, custom_cm, custom_bd, rx_correction, tx_correction, offline_notify_disabled, is_hidden } = data;
+      const { id, name, server_group, region, tags, note, price, billing_cycle, auto_renewal, currency, expire_date, traffic_limit, traffic_calc_type, traffic_alert_percent, interface: networkInterfaceInput, reset_day, collect_interval, report_interval, wss_report_interval, connection_mode, ping_mode, auto_update, custom_ct, custom_cu, custom_cm, custom_bd, node_1, node_2, node_3, node_4, rx_correction, tx_correction, offline_notify_disabled, is_hidden } = data;
       if (!id || !isValidUUID(id)) {
         return createBadRequestResponse('invalidServerId');
       }
@@ -1005,7 +1039,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
       }
       const normalizedAgentConfig = agentConfigResult.config;
 
-      const pingNodes = normalizePingNodeFields({ custom_ct, custom_cu, custom_cm, custom_bd });
+      const pingNodes = normalizePingNodeFields({ custom_ct, custom_cu, custom_cm, custom_bd, node_1, node_2, node_3, node_4 });
       if (!pingNodes.valid) {
         return createBadRequestResponse('invalidPingNodeFormat');
       }
@@ -1042,7 +1076,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
       try {
         await env.DB.prepare(`
           UPDATE servers
-          SET name = ?, server_group = ?, region = ?, tags = ?, note = ?, price = ?, billing_cycle = ?, auto_renewal = ?, currency = ?, expire_date = ?, traffic_limit = ?, traffic_calc_type = ?, "interface" = ?, reset_day = ?, collect_interval = ?, report_interval = ?, wss_report_interval = ?, connection_mode = ?, ping_mode = ?, auto_update = ?, custom_ct = ?, custom_cu = ?, custom_cm = ?, custom_bd = ?, rx_correction = ?, tx_correction = ?, offline_notify_disabled = ?, is_hidden = ?
+          SET name = ?, server_group = ?, region = ?, tags = ?, note = ?, price = ?, billing_cycle = ?, auto_renewal = ?, currency = ?, expire_date = ?, traffic_limit = ?, traffic_calc_type = ?, "interface" = ?, reset_day = ?, collect_interval = ?, report_interval = ?, wss_report_interval = ?, connection_mode = ?, ping_mode = ?, auto_update = ?, custom_ct = ?, custom_cu = ?, custom_cm = ?, custom_bd = ?, node_1 = ?, node_2 = ?, node_3 = ?, node_4 = ?, rx_correction = ?, tx_correction = ?, offline_notify_disabled = ?, is_hidden = ?, traffic_alert_percent = ?
           WHERE id = ?
         `).bind(
           name || '',
@@ -1065,14 +1099,19 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
           normalizedAgentConfig.connection_mode,
           normalizedAgentConfig.ping_mode,
           normalizeBooleanFlag(auto_update),
-          pingNodes.values.custom_ct,
-          pingNodes.values.custom_cu,
-          pingNodes.values.custom_cm,
-          pingNodes.values.custom_bd,
+          pingNodes.values.custom_ct ?? null,
+          pingNodes.values.custom_cu ?? null,
+          pingNodes.values.custom_cm ?? null,
+          pingNodes.values.custom_bd ?? null,
+          pingNodes.values.node_1 ?? null,
+          pingNodes.values.node_2 ?? null,
+          pingNodes.values.node_3 ?? null,
+          pingNodes.values.node_4 ?? null,
           safeRx,
           safeTx,
           normalizeBooleanFlag(offline_notify_disabled),
           normalizeBooleanFlag(is_hidden),
+          normalizePctOrNull(traffic_alert_percent),
           id
         ).run();
       } catch (e) {
@@ -1127,6 +1166,14 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
       const { servers: importData } = data;
       if (!importData || !Array.isArray(importData) || importData.length === 0) {
         return createBadRequestResponse('noServersToImport');
+      }
+
+      // 导入前先补列：INSERT 显式写入 traffic_alert_percent，缺列会导致每条导入全部跳过
+      // 且不自动补列，与单个新增/编辑的行为不一致。此处先确保列存在（非致命，失败仍继续导入）。
+      try {
+        await addServerColumns(env.DB);
+      } catch (e) {
+        console.error('[import_servers] 导入前补列失败:', e);
       }
 
       const existingServers = await env.DB.prepare('SELECT id FROM servers').all();
@@ -1186,9 +1233,9 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
             INSERT INTO servers (id, name, server_group, region, tags, note, price, billing_cycle, auto_renewal,
               currency, expire_date,
               traffic_limit, traffic_calc_type, "interface", reset_day, collect_interval, report_interval, wss_report_interval, connection_mode, ping_mode,
-              auto_update, custom_ct, custom_cu, custom_cm, custom_bd, rx_correction, tx_correction,
-              offline_notify_disabled, is_hidden, sort_order, history_partition_id, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              auto_update, custom_ct, custom_cu, custom_cm, custom_bd, node_1, node_2, node_3, node_4, rx_correction, tx_correction,
+              offline_notify_disabled, is_hidden, sort_order, history_partition_id, timestamp, traffic_alert_percent)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).bind(
             server.id,
             server.name || '',
@@ -1211,17 +1258,20 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
             normalizeConnectionMode(server.connection_mode) || 'auto',
             normalizePingMode(server.ping_mode) || 'tcp',
             normalizeBooleanFlag(server.auto_update),
-            server.custom_ct || '',
-            server.custom_cu || '',
-            server.custom_cm || '',
-            server.custom_bd || '',
+            normalizeImportedPingNodeValue(server.custom_ct),
+            normalizeImportedPingNodeValue(server.custom_cu),
+            normalizeImportedPingNodeValue(server.custom_cm),
+            normalizeImportedPingNodeValue(server.custom_bd),
+            normalizeImportedPingNodeValue(server.node_1), normalizeImportedPingNodeValue(server.node_2),
+            normalizeImportedPingNodeValue(server.node_3), normalizeImportedPingNodeValue(server.node_4),
             server.rx_correction ?? null,
             server.tx_correction ?? null,
             normalizeBooleanFlag(server.offline_notify_disabled),
             normalizeBooleanFlag(server.is_hidden),
             server.sort_order ?? 0,
             partitionId,
-            server.timestamp || Date.now()
+            server.timestamp || Date.now(),
+            normalizePctOrNull(server.traffic_alert_percent)
           ).run();
           imported++;
         } catch (e) {
