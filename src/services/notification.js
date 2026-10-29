@@ -1,4 +1,4 @@
-import { getLatestMetricsForAllServers } from '../database/schema.js';
+import { getLatestTimestampsForAllServers } from '../database/schema.js';
 import { clearServersListCache, getAllServers } from '../utils/cache.js';
 import {
   DEFAULT_NOTIFICATION_TEMPLATE,
@@ -17,19 +17,31 @@ import {
   normalizeNotificationWebhookMethod,
   debug
 } from '../utils/settings.js';
-import { detectBillingCycle, normalizeBillingCycle, renewExpireDateIfNeeded } from '../utils/serverBilling.js';
+import {
+  GB,
+  getTrafficUsageBytes,
+  normalizePct,
+  normalizePctOrNull,
+  normalizeTrafficLimitGb
+} from '../utils/traffic.js';
+import { detectBillingCycle, isEnabledFlag, normalizeBillingCycle, renewExpireDateIfNeeded } from '../utils/serverBilling.js';
 import {
   NOTIFICATION_MAX_RETRIES,
   NOTIFICATION_RETRY_DELAY_MS,
   RESOURCE_ALERT_EVALUATE_RULE_BATCH_SIZE,
   RESOURCE_ALERT_EVALUATE_SERVER_BATCH_SIZE,
+  RESOURCE_ALERT_COMPACT_RESULT_FORMAT,
   RESOURCE_ALERT_NOTIFICATION_SOFT_LIMIT
 } from '../utils/config.js';
+import { getNotificationMessages } from './notificationMessages.js';
 
 const RESOURCE_ALERT_STATE_ACTIVE = 'active';
 const RESOURCE_ALERT_STATE_RECOVERED = 'recovered';
 const RESOURCE_ALERT_STATE_KEY = 'resource_alert_state';
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+// 记录本 isolate 是否已确认资源告警状态为空，避免每分钟重复执行一次 DELETE
+let resourceAlertStateKnownEmpty = false;
 
 function getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
   const date = new Date(timestamp);
@@ -61,14 +73,14 @@ function getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
 
 function formatNotificationTime(timestamp = Date.now(), settings = {}) {
   const parts = getZonedDateParts(timestamp, settings?.notification_timezone);
-  if (!parts) return '无效时间';
+  if (!parts) return getNotificationMessages(settings).invalidTime;
   const pad = value => String(value).padStart(2, '0');
   return `${Number(parts.year)}/${Number(parts.month)}/${Number(parts.day)} ` +
     `${pad(parts.hour)}:${pad(parts.minute)}:${pad(parts.second)}`;
 }
 
 function formatLastReportTime(timestamp, settings = {}) {
-  if (!timestamp) return '无上报记录';
+  if (!timestamp) return getNotificationMessages(settings).noReport;
 
   return formatNotificationTime(timestamp, settings);
 }
@@ -115,32 +127,12 @@ function formatPercent(value) {
   return `${number.toFixed(number >= 10 ? 1 : 2)}%`;
 }
 
-function formatResourceMetric(metric) {
+function getResourceMetricLabel(metric, messages) {
   const metricLabels = {
     cpu: 'CPU',
     ram: 'RAM',
     disk: 'DISK',
-    netIn: '下行网速',
-    netOut: '上行网速',
-    netTotal: '总网速'
-  };
-  const label = metricLabels[metric.metric] || metric.metric;
-  const valueLabel = metric.mode === 'average' ? '平均' : '当前';
-  const value = metric.triggerValue ?? metric.current;
-  if (metric.metric === 'cpu' || metric.metric === 'ram' || metric.metric === 'disk') {
-    return `${label} ${valueLabel} ${formatPercent(value)} > ${formatPercent(metric.threshold)}`;
-  }
-  return `${label} ${valueLabel} ${formatMegabitsPerSecond(value)} > ${formatMegabitsPerSecond(metric.threshold)}`;
-}
-
-function getResourceMetricLabel(metric) {
-  const metricLabels = {
-    cpu: 'CPU',
-    ram: 'RAM',
-    disk: 'DISK',
-    netIn: '下行网速',
-    netOut: '上行网速',
-    netTotal: '总网速'
+    ...messages.metrics
   };
   return metricLabels[metric?.metric] || metric?.metric || '';
 }
@@ -150,16 +142,6 @@ function formatResourceMetricValue(metric, value) {
     return formatPercent(value);
   }
   return formatMegabitsPerSecond(value);
-}
-
-function formatRecoveredResourceMetric(metric) {
-  if (!metric || typeof metric !== 'object') return '';
-  const label = getResourceMetricLabel(metric);
-  const value = metric.current;
-  const valueText = formatResourceMetricValue(metric, value);
-  const thresholdText = formatResourceMetricValue(metric, metric.threshold);
-
-  return `${label} 当前 ${valueText} < ${thresholdText}`;
 }
 
 function parseResourceAlertState(row) {
@@ -190,6 +172,7 @@ export async function clearResourceAlertState(db) {
   const result = await db.prepare(
     `DELETE FROM settings WHERE key = ?`
   ).bind(RESOURCE_ALERT_STATE_KEY).run();
+  resourceAlertStateKnownEmpty = true;
   return getD1Changes(result) > 0;
 }
 
@@ -198,6 +181,7 @@ async function saveResourceAlertState(db, configSignature, alertState, hadStored
     await db.prepare(
       `INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`
     ).bind(RESOURCE_ALERT_STATE_KEY, JSON.stringify({ signature: configSignature, servers: alertState })).run();
+    resourceAlertStateKnownEmpty = false;
     return;
   }
 
@@ -237,6 +221,30 @@ function canRecoverResourceAlert(evaluation) {
   });
 }
 
+// compact-v1 的正常节点仅携带数值摘要；只在需要判断恢复时还原完整指标。
+function expandResourceAlertEvaluation(evaluation) {
+  if (!evaluation?.metricDefinitions) return evaluation;
+  const definitions = evaluation.metricDefinitions;
+  const values = evaluation.metrics;
+  if (!Array.isArray(definitions) || !Array.isArray(values) || definitions.length !== values.length) return null;
+  const metrics = [];
+  for (let index = 0; index < definitions.length; index++) {
+    const summary = values[index];
+    // 顺序：triggerValue, current, min, max, avg。异常响应不能被当成恢复。
+    if (!Array.isArray(summary) || summary.length !== 5 || !summary.every(Number.isFinite)) return null;
+    metrics.push({
+      ...definitions[index],
+      triggerValue: summary[0],
+      triggered: false,
+      current: summary[1],
+      min: summary[2],
+      max: summary[3],
+      avg: summary[4]
+    });
+  }
+  return { serverId: evaluation.serverId, metrics };
+}
+
 function getResourceAlertRuleIntervalMs(rule) {
   const minutes = Number(rule?.intervalMinutes);
   const normalizedMinutes = Number.isFinite(minutes) && minutes > 0 ? minutes : 5;
@@ -249,10 +257,6 @@ function formatCurrentTime(settings = {}) {
 
 function getResourceAlertRuleStateKey(rule, serverId) {
   return `${rule.id}:${serverId}`;
-}
-
-function getResourceAlertRuleName(rule) {
-  return String(rule?.name || '资源负载告警').trim() || '资源负载告警';
 }
 
 function getResourceAlertRuleServerIds(rule, servers) {
@@ -273,13 +277,13 @@ function getResourceAlertRuleServerIds(rule, servers) {
   return ids;
 }
 
-function formatConciseResourceMetric(metric, valueKey = 'triggerValue') {
-  const label = getResourceMetricLabel(metric);
+function formatConciseResourceMetric(metric, valueKey, messages) {
+  const label = getResourceMetricLabel(metric, messages);
   const value = metric?.[valueKey] ?? metric?.current;
   return `${label} ${formatResourceMetricValue(metric, value)}`;
 }
 
-function buildGroupedResourceAlertEntries(nodes, valueKey = 'triggerValue') {
+function buildGroupedResourceAlertEntries(nodes, valueKey, messages) {
   const groups = new Map();
 
   for (const item of Array.isArray(nodes) ? nodes : []) {
@@ -296,7 +300,7 @@ function buildGroupedResourceAlertEntries(nodes, valueKey = 'triggerValue') {
     }
 
     for (const metric of sourceMetrics) {
-      const text = formatConciseResourceMetric(metric, valueKey);
+      const text = formatConciseResourceMetric(metric, valueKey, messages);
       if (!text || group.seen.has(text)) continue;
       group.seen.add(text);
       group.metrics.push(text);
@@ -348,21 +352,22 @@ function appendResourceAlertNotificationChunks(payloads, entries, options) {
   flush();
 }
 
-export function buildResourceAlertNotificationPayloads(alertNodes, recoveredNodes) {
+export function buildResourceAlertNotificationPayloads(alertNodes, recoveredNodes, settings = {}) {
+  const messages = getNotificationMessages(settings);
   const payloads = [];
   appendResourceAlertNotificationChunks(
     payloads,
-    buildGroupedResourceAlertEntries(alertNodes, 'triggerValue'),
+    buildGroupedResourceAlertEntries(alertNodes, 'triggerValue', messages),
     {
-      event: '资源负载告警',
+      event: messages.events.resourceAlert,
       emoji: '❌'
     }
   );
   appendResourceAlertNotificationChunks(
     payloads,
-    buildGroupedResourceAlertEntries(recoveredNodes, 'current'),
+    buildGroupedResourceAlertEntries(recoveredNodes, 'current', messages),
     {
-      event: '资源负载恢复',
+      event: messages.events.resourceRecovered,
       emoji: '✅'
     }
   );
@@ -392,6 +397,7 @@ async function evaluateResourceAlertRules(stub, ruleRequests) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          resultFormat: RESOURCE_ALERT_COMPACT_RESULT_FORMAT,
           rules: batch.map(({ rule, serverIds }) => ({
             ruleId: rule.id,
             serverIds,
@@ -416,17 +422,27 @@ async function evaluateResourceAlertRules(stub, ruleRequests) {
           evaluatedServerIds: [],
           evaluations: []
         };
-        existing.alerts.push(...(Array.isArray(item.alerts) ? item.alerts : []));
-        existing.evaluatedServerIds.push(...(
-          Array.isArray(item.evaluatedServerIds)
-            ? item.evaluatedServerIds.map(id => String(id)).filter(Boolean)
-            : []
-        ));
-        existing.evaluations.push(...(
-          Array.isArray(item.evaluations)
-            ? item.evaluations.filter(evaluation => evaluation && evaluation.serverId)
-            : []
-        ));
+        const alerts = Array.isArray(item.alerts) ? item.alerts : [];
+        const evaluations = Array.isArray(item.evaluations)
+          ? item.evaluations.filter(evaluation => evaluation && evaluation.serverId)
+          : [];
+        existing.alerts.push(...alerts);
+        if (item.format === RESOURCE_ALERT_COMPACT_RESULT_FORMAT) {
+          // 紧凑响应的 alerts / evaluations 覆盖全部成功评估节点，失败节点仍不参与状态迁移。
+          existing.evaluatedServerIds.push(...alerts.map(alert => String(alert.serverId)));
+          for (const evaluation of evaluations) {
+            evaluation.metricDefinitions = item.metricDefinitions;
+            existing.evaluatedServerIds.push(String(evaluation.serverId));
+          }
+        } else {
+          // 滚动部署时仍接受旧 DO 的完整响应。
+          existing.evaluatedServerIds.push(...(
+            Array.isArray(item.evaluatedServerIds)
+              ? item.evaluatedServerIds.map(id => String(id)).filter(Boolean)
+              : []
+          ));
+        }
+        existing.evaluations.push(...evaluations);
         resultMap.set(ruleId, existing);
       }
     } catch (e) {
@@ -464,9 +480,9 @@ function stripMarkdown(value) {
     .trim();
 }
 
-function inferNotificationEvent(msg) {
+function inferNotificationEvent(msg, fallback) {
   const firstLine = String(msg || '').split('\n').find(line => line.trim());
-  return stripMarkdown(firstLine || '通知') || '通知';
+  return stripMarkdown(firstLine || fallback) || fallback;
 }
 
 function escapeJsonStringFragment(value) {
@@ -506,7 +522,7 @@ function buildNotificationContext(settings, msg, context = {}) {
   const count = Number.isFinite(Number(context.count)) && Number(context.count) > 0
     ? Number(context.count)
     : clients.length;
-  const event = context.event || inferNotificationEvent(msg);
+  const event = context.event || inferNotificationEvent(msg, getNotificationMessages(settings).events.notification);
   return {
     title: '💌 Cloudflare Server Monitor',
     event,
@@ -623,11 +639,217 @@ async function sendCustomWebhookNotification(settings, context) {
   await fetchWithRetry(endpoint, options);
 }
 
+// SMTP 通知复用 tg_bot_token 字段，配置以 "smtp:" 前缀协议存储（方案 A）。
+// 格式: smtp://<user>:<password>@<host>:<port>?from=<from>&to=<to1,to2>&secure=<auto|tls|starttls>
+export function isSmtpNotificationTarget(token) {
+  // 与前端保持一致：协议头大小写不敏感（SMTP:// 同样识别）
+  return String(token || '').trim().toLowerCase().indexOf('smtp:') === 0;
+}
+
 function hasNotificationTarget(settings) {
   if (normalizeBooleanSetting(settings?.notification_webhook_enabled) === 'true') {
     return String(settings?.notification_webhook_url || '').trim().length > 0;
   }
+  // 内置渠道（含 SMTP）只要 tg_bot_token 非空即视为已配置目标
   return String(settings?.tg_bot_token || '').trim().length > 0;
+}
+
+// ===== 月流量阈值告警（上报路径触发，账期重置=数值回落，状态={u,th,lim}）=====
+const TRAFFIC_ALERT_STATE_KEY = 'traffic_alert_state';
+const TRAFFIC_ALERT_RESET_FACTOR = 0.5;
+
+function parseTrafficAlertState(raw) {
+  if (!raw) return null;
+  try {
+    const o = JSON.parse(raw);
+    if (o && Number.isFinite(o.u) && o.u > 0) {
+      return { u: Math.round(o.u), th: normalizePct(o.th), lim: normalizeTrafficLimitGb(o.lim) };
+    }
+  } catch (_) {}
+  return null;
+}
+
+// hooks.patchCache?.(serverId, valueOrNull) —— 缓存实现由调用方注入，本函数不 import 任何 cache 模块
+export async function evaluateTrafficAlert(env, server, metrics, hooks = {}) {
+  try {
+    if (!env?.DB || !server || !metrics) return;
+
+    const limit = normalizeTrafficLimitGb(server.traffic_limit);
+    if (limit <= 0) return; // 未设限额：不监控
+
+    const settings = await loadSiteSettings(env.DB);
+    const globalPct = normalizePct(settings?.traffic_alert_threshold);
+    // 逐台阈值三态：null/未设置 → 跟随全局；数字（含 0）→ 覆盖，0 = 显式关闭该服务器告警
+    const pctServer = normalizePctOrNull(server.traffic_alert_percent);
+    const effectivePct = pctServer === null ? globalPct : pctServer;
+    if (effectivePct <= 0) return;                 // 阈值关闭 / 该服务器显式关闭
+    if (!hasNotificationTarget(settings)) return;  // 未配置通知渠道：不发也不写
+
+    const used = Math.round(getTrafficUsageBytes(
+      metrics.net_rx_monthly,
+      metrics.net_tx_monthly,
+      server.traffic_calc_type
+    ));
+    const limitBytes = limit * GB;
+    const percent = (used / limitBytes) * 100;
+
+    const oldStr = server[TRAFFIC_ALERT_STATE_KEY] == null ? '' : String(server[TRAFFIC_ALERT_STATE_KEY]);
+    const state = parseTrafficAlertState(server[TRAFFIC_ALERT_STATE_KEY]);
+
+    if (state) {
+      // ① 回落=新账期/重装/大校正 → 持久清零（不可只在内存即时重算）
+      if (used < state.u * TRAFFIC_ALERT_RESET_FACTOR) {
+        const { meta } = await env.DB.prepare(
+          `UPDATE servers SET traffic_alert_state = NULL WHERE id = ? AND COALESCE(traffic_alert_state,'') = ?`
+        ).bind(server.id, oldStr).run();
+        if (meta && meta.changes > 0) hooks.patchCache?.(server.id, null);
+        return;
+      }
+      // ② 规则签名一致且未回落 → 同账期已发，抑制
+      if (state.th === effectivePct && state.lim === limit) return;
+      // ③ th/lim 变 → 重新可发，继续
+    }
+
+    if (percent < effectivePct) return; // 未达阈值
+
+    // 先发后写
+    const serverName = server.name || server.id;
+    const messages = getNotificationMessages(settings);
+    const usage = messages.trafficUsed({
+      usedGb: (used / GB).toFixed(1),
+      limitGb: limit,
+      percent: percent.toFixed(1),
+      threshold: effectivePct
+    });
+    const msg = `${serverName}  ${usage}`;
+    const err = await sendNotification(settings, msg, {
+      event: messages.events.trafficAlert,
+      emoji: '📈',
+      clients: [serverName],
+      count: 1,
+      message: msg
+    });
+    if (err) return; // 失败：不写，下次上报重试
+
+    const newStr = JSON.stringify({ u: used, th: effectivePct, lim: limit });
+    const { meta } = await env.DB.prepare(
+      `UPDATE servers SET traffic_alert_state = ? WHERE id = ? AND COALESCE(traffic_alert_state,'') = ?`
+    ).bind(newStr, server.id, oldStr).run();
+    if (meta && meta.changes > 0) hooks.patchCache?.(server.id, newStr);
+  } catch (e) {
+    console.error('[traffic-alert] evaluate failed:', e);
+  }
+}
+
+const SMTP_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// 信封地址防注入：剥离 CR/LF 并校验邮箱格式（subject/body 已有 sanitize，信封同样需要）
+function normalizeSmtpAddress(value) {
+  return String(value || '').replace(/[\r\n]/g, '').trim();
+}
+
+function parseSmtpNotificationConfig(rawToken) {
+  const url = new URL(String(rawToken).trim());
+  const host = url.hostname;
+  if (!host) throw new Error('缺少 SMTP 主机');
+
+  const secureParam = (url.searchParams.get('secure') || 'auto').toLowerCase();
+  // 不提供 'off'（明文传输），避免凭据被静默降级为明文发送
+  const allowedSecure = ['auto', 'tls', 'starttls'];
+  const secureTransport = allowedSecure.includes(secureParam) ? secureParam : 'auto';
+  const port = url.port ? Number(url.port) : (secureTransport === 'tls' ? 465 : 587);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error('SMTP 端口无效');
+  }
+  // Cloudflare Workers 永久封禁 25 端口出站
+  if (port === 25) {
+    throw new Error('Cloudflare Workers 不支持 25 端口，请使用 465(implicit TLS) 或 587(STARTTLS)');
+  }
+  // auto 模式下非 465/587 端口会被库推导为明文连接，必须显式指定加密方式
+  if (secureTransport === 'auto' && port !== 465 && port !== 587) {
+    throw new Error('非 465/587 端口必须显式指定加密方式 (secure=tls 或 secure=starttls)');
+  }
+
+  const decode = value => {
+    try {
+      return decodeURIComponent(value);
+    } catch (_) {
+      return value;
+    }
+  };
+  const username = decode(url.username || '');
+  const password = decode(url.password || '');
+  if (!username) throw new Error('缺少 SMTP 用户名');
+  if (!password) throw new Error('缺少 SMTP 密码');
+
+  const from = normalizeSmtpAddress(url.searchParams.get('from') || username);
+  if (!SMTP_EMAIL_PATTERN.test(from)) throw new Error('SMTP 发件人地址无效');
+  const to = (url.searchParams.get('to') || '')
+    .split(',')
+    .map(normalizeSmtpAddress)
+    .filter(Boolean);
+  if (to.length === 0) throw new Error('缺少收件人 (to)');
+  if (to.some(address => !SMTP_EMAIL_PATTERN.test(address))) {
+    throw new Error('SMTP 收件人地址无效');
+  }
+
+  return { host, port, username, password, from, to, secureTransport };
+}
+
+// 仅对临时性失败重试：连接类异常与 4xx（如 421/450 限流、暂时不可用）；
+// 5xx 为永久性拒绝（550 收件人拒绝等），454 为认证失败（部分邮箱如 QQ 使用 4xx 码），
+// 两者重试无意义且易触发邮箱风控
+function isSmtpRetryableError(error) {
+  const match = String(error?.message || error).match(/SMTP error (\d{3})/);
+  if (!match) return true;
+  const code = Number(match[1]);
+  return code >= 400 && code < 500 && code !== 454;
+}
+
+async function withSmtpRetry(task, retries = NOTIFICATION_MAX_RETRIES) {
+  let lastError;
+  for (let i = 0; i < retries; i++) {
+    try {
+      await task();
+      return;
+    } catch (e) {
+      lastError = e;
+      if (!isSmtpRetryableError(e)) break;
+      if (i < retries - 1) {
+        await new Promise(resolve => setTimeout(resolve, NOTIFICATION_RETRY_DELAY_MS));
+      }
+    }
+  }
+  throw lastError || new Error('Max retries exceeded');
+}
+
+async function sendSmtpNotification(settings, context, formattedMsg) {
+  let config;
+  try {
+    config = parseSmtpNotificationConfig(settings.tg_bot_token);
+  } catch (e) {
+    return `SMTP 通知配置错误: ${e.message}`;
+  }
+  try {
+    // 动态导入：cloudflare-smtp 依赖 cloudflare:sockets，仅在运行时（Workers）加载
+    const { sendMail } = await import('cloudflare-smtp');
+    const subject = `${context.emoji || ''} ${context.event || getNotificationMessages(settings).events.notification}`.trim();
+    const text = String(formattedMsg || '').replace(/\*/g, '');
+    await withSmtpRetry(() => sendMail(
+      {
+        host: config.host,
+        port: config.port,
+        username: config.username,
+        password: config.password,
+        from: config.from,
+        to: config.to,
+        secureTransport: config.secureTransport
+      },
+      { subject, text }
+    ));
+    return;
+  } catch (e) {
+    return `SMTP 邮件通知发送失败: ${e.message}`;
+  }
 }
 
 export async function sendNotification(settings, msg, notificationContext = {}) {
@@ -647,6 +869,10 @@ export async function sendNotification(settings, msg, notificationContext = {}) 
   }
 
   if(!settings.tg_bot_token) return;
+  if (isSmtpNotificationTarget(settings.tg_bot_token)) {
+    // SMTP 邮件通知（前缀协议: smtp://...），置于内置渠道分发链最前
+    return await sendSmtpNotification(settings, context, formattedMsg);
+  }
   if(settings.tg_bot_token.indexOf("onebot:") == 0) {
     // OneBot 协议 (QQ 等)，私聊格式: onebot:http://127.0.0.1:3000/send_private_msg?access_token=xxx
     // 群聊格式: onebot:http://127.0.0.1:3000/send_group_msg?access_token=xxx
@@ -814,17 +1040,23 @@ export async function sendNotification(settings, msg, notificationContext = {}) 
   }
 }
 
-export async function checkOfflineNodes(db) {
-  const siteSettings = await loadSiteSettings(db);
+export async function checkOfflineNodes(db, options = {}) {
+  const siteSettings = options.siteSettings ?? await loadSiteSettings(db);
   const tgNotifyMinutes = getTgNotifyMinutes(siteSettings.tg_notify);
 
   if (tgNotifyMinutes === 0 || !hasNotificationTarget(siteSettings)) return;
 
   try {
-    const allServers = await getAllServers(db);
-    
-    const latestMetricsMap = await getLatestMetricsForAllServers(db);
-    
+    const servers = (await getAllServers(db)).filter(server => server.offline_notify_disabled !== '1');
+    if (servers.length === 0) return;
+
+    const latestTimestampsMap = await getLatestTimestampsForAllServers(db, { servers });
+    if (!latestTimestampsMap) {
+      // 获取失败时跳过本次检测，避免把所有服务器误判为离线
+      debug('[Cron] 获取最新上报时间戳失败，跳过本次离线检测');
+      return;
+    }
+
     let alertState = {};
     const stateRes = await db.prepare(
       "SELECT value FROM settings WHERE key = 'alert_state'"
@@ -843,21 +1075,19 @@ export async function checkOfflineNodes(db) {
     const offlineNodes = [];
     const recoveredNodes = [];
 
-    for (const s of allServers) {
-      if (s.offline_notify_disabled === '1') continue;
+    for (const s of servers) {
+      const hasLatestReport = latestTimestampsMap.has(s.id);
+      const lastReportTime = latestTimestampsMap.get(s.id);
 
-      const latestMetrics = latestMetricsMap.get(s.id);
-      
       let isOffline = true;
-      if (latestMetrics) {
-        const diff = now - latestMetrics.timestamp;
-        isOffline = diff > offlineThreshold;
+      if (hasLatestReport) {
+        isOffline = now - lastReportTime > offlineThreshold;
       }
 
       if (isOffline && !alertState[s.id]) {
         offlineNodes.push({
           name: s.name,
-          lastReportTime: latestMetrics?.timestamp
+          lastReportTime
         });
         alertState[s.id] = true;
       } else if (!isOffline && alertState[s.id]) {
@@ -872,13 +1102,14 @@ export async function checkOfflineNodes(db) {
       ).bind(JSON.stringify(alertState)).run();
     }
 
+    const messages = getNotificationMessages(siteSettings);
     if (offlineNodes.length > 0) {
       const nodeList = offlineNodes
-        .map(n => `${n.name}  最后上报: ${formatLastReportTime(n.lastReportTime, siteSettings)}`)
+        .map(n => `${n.name}  ${messages.lastReport(formatLastReportTime(n.lastReportTime, siteSettings))}`)
         .join('\n');
       const msg = nodeList;
       await sendNotification(siteSettings, msg, {
-        event: '节点离线告警',
+        event: messages.events.offline,
         emoji: '❌',
         clients: offlineNodes.map(n => n.name),
         count: offlineNodes.length,
@@ -890,7 +1121,7 @@ export async function checkOfflineNodes(db) {
       const nodeList = recoveredNodes.map(n => n.name).join('\n');
       const msg = nodeList;
       await sendNotification(siteSettings, msg, {
-        event: '节点恢复通知',
+        event: messages.events.recovered,
         emoji: '✅',
         clients: recoveredNodes.map(n => n.name),
         count: recoveredNodes.length,
@@ -902,17 +1133,22 @@ export async function checkOfflineNodes(db) {
   }
 }
 
-export async function checkResourceAlerts(env) {
+export async function checkResourceAlerts(env, options = {}) {
   if (!env?.DB || !env?.METRICS_BROADCASTER) return;
 
   const db = env.DB;
-  const siteSettings = await loadSiteSettings(db, { forceRefresh: true });
+  const minute = Number.isFinite(options?.minute) ? options.minute : new Date().getUTCMinutes();
+  // 每 2 分钟强制刷新一次设置，其余分钟复用缓存（TTL 120s），降低每分钟的 CPU 开销
+  const forceRefresh = minute % 2 === 0;
+  const siteSettings = options.siteSettings ?? await loadSiteSettings(db, { forceRefresh });
   if (!hasNotificationTarget(siteSettings)) return;
 
   const resourceConfig = getResourceAlertConfig(siteSettings);
 
   if (!resourceConfig.enabled || !resourceConfig.hasRules) {
-    await clearResourceAlertState(db);
+    if (!resourceAlertStateKnownEmpty) {
+      await clearResourceAlertState(db);
+    }
     return;
   }
 
@@ -1006,7 +1242,6 @@ export async function checkResourceAlerts(env) {
     for (const { key, rule, server } of evaluatedRuleServers) {
       const active = activeMap.get(key);
       const alert = active?.alert;
-      const evaluation = evaluationMap.get(key);
       const currentState = alertState[key];
       const currentStatus = currentState
         ? getResourceAlertStateStatus(currentState)
@@ -1046,6 +1281,7 @@ export async function checkResourceAlerts(env) {
         }
       } else if (currentState) {
         if (currentStatus === RESOURCE_ALERT_STATE_ACTIVE) {
+          const evaluation = expandResourceAlertEvaluation(evaluationMap.get(key));
           if (!canRecoverResourceAlert(evaluation)) {
             continue;
           }
@@ -1072,7 +1308,7 @@ export async function checkResourceAlerts(env) {
       await saveResourceAlertState(db, configSignature, alertState, hadStoredState);
     }
 
-    const notificationPayloads = buildResourceAlertNotificationPayloads(alertNodes, recoveredNodes);
+    const notificationPayloads = buildResourceAlertNotificationPayloads(alertNodes, recoveredNodes, siteSettings);
     for (const payload of notificationPayloads) {
       const notificationError = await sendNotification(siteSettings, payload.msg, payload.context);
       if (notificationError) {
@@ -1097,23 +1333,27 @@ export async function checkExpiringServers(db, options = {}) {
     const expiringServers = [];
     const reminderDays = getExpireReminderDays(siteSettings.expire_reminder);
     const shouldNotify = reminderDays > 0 && hasNotificationTarget(siteSettings);
-    let hasRenewedServers = false;
+    const renewedServers = [];
     const currentDateSerial = getZonedDateSerial(now, siteSettings.notification_timezone);
 
     for (const s of allServers) {
       if (!s.expire_date) continue;
 
       const billingCycle = normalizeBillingCycle(detectBillingCycle(s.price) || s.billing_cycle);
-      const renewal = renewExpireDateIfNeeded(s.expire_date, billingCycle, s.auto_renewal, now, 1);
+      // 续费时机 = 到期日 - min(提醒天数, 5)，最长提前 5 天
+      const renewal = renewExpireDateIfNeeded(s.expire_date, billingCycle, s.auto_renewal, now, Math.min(reminderDays, 5));
       if (renewal.renewed) {
         await db.prepare(
           'UPDATE servers SET expire_date = ?, billing_cycle = ? WHERE id = ?'
         ).bind(renewal.expire_date, billingCycle, s.id).run();
         s.expire_date = renewal.expire_date;
         s.billing_cycle = billingCycle;
-        hasRenewedServers = true;
+        renewedServers.push({ name: s.name, expire_date: renewal.expire_date });
         debug(`[Cron] 服务器 ${s.name} 已自动续费，到期日期更新为 ${s.expire_date}`);
       }
+
+      // 勾选自动续费的节点只走「续费成功」提醒，不计入到期提醒
+      if (isEnabledFlag(s.auto_renewal)) continue;
 
       if (!shouldNotify) continue;
 
@@ -1129,21 +1369,43 @@ export async function checkExpiringServers(db, options = {}) {
       }
     }
 
-    if (hasRenewedServers) {
+    const messages = getNotificationMessages(siteSettings);
+    if (renewedServers.length > 0) {
       clearServersListCache();
+
+      // 续费成功提醒：与「到期提醒」开关解耦，只要配置了通知渠道就发送
+      if (hasNotificationTarget(siteSettings)) {
+        const renewalList = renewedServers.map(s => `${s.name}  ${messages.renewedUntil(s.expire_date)}`).join('\n');
+        debug(`[Cron] 发送自动续费成功通知: ${renewalList}`);
+        try {
+          await sendNotification(siteSettings, renewalList, {
+            event: messages.events.renewed,
+            emoji: '✅',
+            clients: renewedServers.map(s => s.name),
+            count: renewedServers.length,
+            message: renewalList
+          });
+        } catch (e) {
+          console.error('自动续费成功通知发送失败:', e);
+        }
+      }
     }
 
     if (expiringServers.length > 0) {
-      const serverList = expiringServers.map(s => `${s.name}  剩余${s.days}天  ${s.expire_date}`).join('\n');
+      const serverList = expiringServers.map(s => `${s.name}  ${messages.daysLeft(s.days)}  ${s.expire_date}`).join('\n');
       const msg = serverList;
       debug(`[Cron] 发送到期提醒通知: ${msg}`);
-      await sendNotification(siteSettings, msg, {
-        event: '服务器到期提醒',
-        emoji: '⚠️',
-        clients: expiringServers.map(s => s.name),
-        count: expiringServers.length,
-        message: serverList
-      });
+      try {
+        await sendNotification(siteSettings, msg, {
+          event: messages.events.expiring,
+          emoji: '⚠️',
+          clients: expiringServers.map(s => s.name),
+          count: expiringServers.length,
+          message: serverList
+        });
+      } catch (e) {
+        console.error('服务器到期提醒通知发送失败:', e);
+      }
     }
     return true;
   } catch (e) {
