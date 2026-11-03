@@ -16,12 +16,6 @@
           <span class="theme-current-label">{{ trans.currentTheme }}</span>
           <span class="theme-current-value">{{ currentThemeLabel }}</span>
         </div>
-        <button
-          v-if="currentThemeUrl"
-          @click="clearTheme"
-          class="btn btn-sm"
-          :disabled="applyingThemeId === '__builtin__'"
-        >↩ {{ trans.useBuiltinTheme }}</button>
       </div>
 
       <div class="theme-custom mb-4">
@@ -49,6 +43,12 @@
             class="btn btn-primary"
             :disabled="!customThemeUrl || applyingThemeId === '__custom__'"
           >⇄ {{ applyingThemeId === '__custom__' ? trans.saving : trans.applyCustomTheme }}</button>
+          <button
+            v-if="currentThemeUrl"
+            @click="clearTheme"
+            class="btn"
+            :disabled="applyingThemeId === '__builtin__'"
+          >↩ {{ trans.useBuiltinTheme }}</button>
         </div>
       </div>
 
@@ -172,6 +172,7 @@ import { currentLang } from '../../../utils/i18n'
 import { adminApi } from '../../../utils/api'
 import { normalizeDisplayMode } from '../../../utils/displayMode'
 import { isMikusThemeEnabled } from '../../../utils/themeOptions'
+import { APPEARANCE_FIELDS } from '../../../../utils/settings'
 
 const props = defineProps({
   trans: { type: Object, required: true },
@@ -214,28 +215,30 @@ const parseThemeOptionsJson = () => {
 
 const isMikusThemeActive = computed(() => isMikusThemeEnabled(parseThemeOptionsJson()))
 const currentThemeLabel = computed(() => isMikusThemeActive.value ? 'Mikus' : (props.currentThemeUrl || props.trans.builtinTheme))
-const mikusThemeTags = computed(() => currentLang.value === 'zh'
-  ? ['内置', 'Mikus', '樱花']
-  : ['Built-in', 'Mikus', 'Sakura']
-)
-const mikusThemeDescription = computed(() => currentLang.value === 'zh'
-  ? '内置 Mikus 模式，启用后切回默认主题，并开启 Mikus 配色、加载页与樱花动效。'
-  : 'Built-in Mikus mode. Switches back to the default theme and enables Mikus colors, loading screens, and sakura effects.'
-)
+const mikusThemeTags = computed(() => [props.trans.mikusThemeTagBuiltin, 'Mikus', props.trans.mikusThemeTagSakura])
+const mikusThemeDescription = computed(() => props.trans.mikusThemeDescription)
 
-const buildAppearanceSettings = (themeOptions) => ({
-  site_title: props.settings?.site_title || '',
-  custom_bg: props.settings?.custom_bg || '',
-  favicon: props.settings?.favicon || '',
-  custom_head: props.settings?.custom_head || '',
-  custom_script: props.settings?.custom_script || '',
-  csp_static: props.settings?.csp_static || '',
-  csp_api: props.settings?.csp_api || '',
-  display_mode: normalizeDisplayMode(props.settings?.display_mode),
-  appearance_options: {
+// Derive the appearance payload from the shared APPEARANCE_FIELDS constant so it
+// always stays in sync with the backend. The theme store re-sends appearance on
+// every apply/switch/Mikus toggle, and the backend overwrites the whole
+// appearance_options row — any omitted field would be wiped (e.g. custom_bg_mobile).
+// NOTE: this relies on props.settings carrying the current value for every field in
+// APPEARANCE_FIELDS. If a field is added to APPEARANCE_FIELDS later, make sure it is
+// also populated in the get_settings mapping in views/admin/index.vue, otherwise it
+// will be sent as '' here and effectively reset on save.
+const buildAppearanceSettings = (themeOptions) => {
+  const source = props.settings || {}
+  const settings = {}
+  for (const field of APPEARANCE_FIELDS) {
+    if (field === 'theme_options') continue
+    settings[field] = source[field] ?? ''
+  }
+  settings.display_mode = normalizeDisplayMode(source.display_mode)
+  settings.appearance_options = {
     theme_options: themeOptions
   }
-})
+  return settings
+}
 
 const initSelectedVersions = (reset = false) => {
   themes.value.forEach(theme => {
@@ -709,7 +712,7 @@ const getThemeDescription = (theme) => {
 
   const keys = currentLang.value === 'zh'
     ? ['zh-CN', 'en']
-    : ['en', 'zh-CN']
+    : [currentLang.value, 'en', 'zh-CN']
 
   for (const key of keys) {
     if (typeof description[key] === 'string' && description[key].trim()) {
