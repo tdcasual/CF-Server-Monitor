@@ -26,12 +26,14 @@
         <button v-if="newServerGroup" @click="newServerGroup = ''" class="toolbar-select-clear" aria-label="Clear">✕</button>
       </div>
       <button @click="$emit('add-server')" class="btn btn-primary">+ {{ trans.addServer }}</button>
+      <button @click="$emit('auto-discovery-cmd')" class="btn">🤖 {{ trans.autoAdd }}</button>
     </div>
 
     <div class="batch-actions">
       <button @click="$emit('batch-edit')" class="btn btn-blue" :disabled="selectedServers.length === 0">✏️ {{ trans.batchEdit }}</button>
       <button @click="$emit('batch-delete')" class="btn btn-red">🗑 {{ trans.batchDelete }}</button>
       <button @click="$emit('toggle-select-all')" class="btn">☐ {{ trans.toggleAll }}</button>
+      <button @click="$emit('refresh-cache')" class="btn" :disabled="cacheRefreshing">{{ cacheRefreshing ? '⏳' : '🔄' }} {{ trans.refreshCache }}</button>
     </div>
 
     <div class="table-wrapper">
@@ -87,15 +89,9 @@
                   <OsIcon :os="server.os" />
                 </span>
                 <a
-                  v-if="themeUrl"
-                  :href="getPublicServerHref(server)"
+                  :href="getServerDetailHref(server)"
                   class="server-name-link"
                 >{{ server.name }}</a>
-                <router-link
-                  v-else
-                  :to="getDefaultServerRoute(server)"
-                  class="server-name-link"
-                >{{ server.name }}</router-link>
               </div>
             </td>
             <td>
@@ -108,7 +104,7 @@
                   :key="ipItem.copyField"
                   class="server-ip-line"
                   :class="{ 'spec-copied': isSpecCopied(server, ipItem.copyField) }"
-                  @dblclick.stop="emitCopySpec(server, ipItem.copyField, ipItem.address)"
+                  @click.stop="emitCopySpec(server, ipItem.copyField, ipItem.address)"
                 >
                   <span class="server-ip-value">{{ ipItem.address }}</span>
                 </span>
@@ -126,36 +122,34 @@
               <span
                 class="note-text"
                 :class="{ 'note-copied': copiedNoteServerId === server.id }"
-                @dblclick.stop="$emit('copy-note', server)"
+                @click.stop="$emit('copy-note', server)"
               >{{ server.note || '-' }}</span>
             </td>
             <td>
               <span
                 class="spec-text"
                 :class="{ 'spec-copied': isSpecCopied(server, 'price') }"
-                @dblclick.stop="emitCopySpec(server, 'price', formatServerPrice(server))"
+                @click.stop="emitCopySpec(server, 'price', formatServerPrice(server))"
               >{{ formatServerPrice(server) }}</span>
             </td>
             <td><span class="date-text">{{ server.expire_date || '-' }}</span></td>
             <td>
               <span
-                class="spec-text"
-                :class="{ 'spec-copied': isSpecCopied(server, 'auto_renewal') }"
-                @dblclick.stop="emitCopySpec(server, 'auto_renewal', isServerAutoRenewal(server) ? trans.enabled : trans.disabled)"
+                class="renewal-text"
               >{{ isServerAutoRenewal(server) ? trans.enabled : trans.disabled }}</span>
             </td>
             <td>
               <span
                 class="spec-text"
                 :class="{ 'spec-copied': isSpecCopied(server, 'traffic_limit') }"
-                @dblclick.stop="emitCopySpec(server, 'traffic_limit', server.traffic_limit ? formatBytes(server.traffic_limit * 1024 * 1024 * 1024) : '')"
+                @click.stop="emitCopySpec(server, 'traffic_limit', server.traffic_limit ? formatBytes(server.traffic_limit * 1024 * 1024 * 1024) : '')"
               >{{ server.traffic_limit ? formatBytes(server.traffic_limit * 1024 * 1024 * 1024) : '-' }}</span>
             </td>
             <td>
               <span
                 class="spec-text"
                 :class="[getAgentVersionClass(server.agent_version), { 'spec-copied': isSpecCopied(server, 'agent_version') }]"
-                @dblclick.stop="emitCopySpec(server, 'agent_version', server.agent_version)"
+                @click.stop="emitCopySpec(server, 'agent_version', server.agent_version)"
               >{{ server.agent_version || '●' }}</span>
             </td>
             <td>
@@ -182,7 +176,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { getFlagRegionCode, formatBytes } from '../../../utils/api'
 import { getPublicAssetUrl } from '../../../utils/config'
 import { currentLang } from '../../../utils/i18n'
-import { detectBillingCycle, detectCurrencySymbol, getBillingCycleOption, isEnabledFlag, isFreePrice, normalizeCurrency, normalizePrice } from '../../../utils/server.js'
+import { detectBillingCycle, detectCurrencySymbol, getBillingCycleOption, getLocalizedOptionField, isEnabledFlag, isFreePrice, normalizeCurrency, normalizePrice } from '../../../utils/server.js'
 import OsIcon from '../../../components/OsIcon.vue'
 import HelpTooltip from '../../../components/HelpTooltip.vue'
 
@@ -193,8 +187,8 @@ const props = defineProps({
   groups: { type: Array, default: () => ['Default'] },
   activeTab: { type: String, default: 'servers' },
   selectedApiIndex: { type: Number, default: 0 },
-  themeUrl: { type: String, default: '' },
   latestAgentVersion: { type: String, default: '' },
+  cacheRefreshing: { type: Boolean, default: false },
   copiedServerId: { type: [String, Number], default: null },
   copiedNoteServerId: { type: [String, Number], default: null },
   copiedSpecKey: { type: String, default: null }
@@ -204,7 +198,7 @@ const newServerName = defineModel('newServerName', { type: String, default: '' }
 const newServerGroup = defineModel('newServerGroup', { type: String, default: '' })
 
 const emit = defineEmits([
-  'add-server', 'batch-edit', 'batch-delete', 'toggle-select-all', 'select-all',
+  'add-server', 'auto-discovery-cmd', 'batch-edit', 'batch-delete', 'toggle-select-all', 'refresh-cache', 'select-all',
   'drag-start', 'drop', 'toggle-server', 'copy-note',
   'copy-spec', 'copy-cmd', 'edit', 'delete'
 ])
@@ -466,7 +460,7 @@ const formatServerPrice = (server) => {
   if (isFreePrice(price)) return props.trans.free
   const currency = normalizeCurrency(server.currency || detectCurrencySymbol(server.price))
   const option = getBillingCycleOption(detectBillingCycle(server.price) || server.billing_cycle)
-  const cycleLabel = currentLang.value === 'zh' ? option.shortLabelZh : option.shortLabelEn
+  const cycleLabel = getLocalizedOptionField(option, 'shortLabel', currentLang.value)
   return `${currency}${trimDisplayPrice(price)}/${cycleLabel}`
 }
 const isServerAutoRenewal = (server) => isEnabledFlag(server.auto_renewal)
@@ -477,6 +471,6 @@ const getAgentVersionClass = (version) => {
   return normalizeVersion(version) === latest ? 'text-green' : 'text-red'
 }
 const getServerQuery = () => props.selectedApiIndex ? `?apiIndex=${props.selectedApiIndex}` : ''
-const getDefaultServerRoute = (server) => `/server/${server.id}${getServerQuery()}`
-const getPublicServerHref = (server) => `/#/server/${encodeURIComponent(server.id)}${getServerQuery()}`
+// 详情页是公开页面，走域名根路径入口 /#/server/:id
+const getServerDetailHref = (server) => `/#/server/${encodeURIComponent(server.id)}${getServerQuery()}`
 </script>
