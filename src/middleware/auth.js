@@ -3,6 +3,10 @@ import { verifyPasswordHash } from '../utils/common.js';
 import { isValidJwtSecret } from '../utils/settings.js';
 
 export const AUTH_COOKIE_NAME = 'cfsm_auth';
+// 与登录态同步出现的标记 cookie，供 Cloudflare 安全规则放行已登录用户使用。
+// 注意：它是全员共享的静态值，只能当作降噪标记，不能当作访问凭证。
+export const UA_COOKIE_NAME = 'cfsm_ua';
+export const AUTH_COOKIE_MAX_AGE = 604800;
 const TOKEN_QUERY_KEYS = ['token', 'auth_token', 'ws_token'];
 
 async function generateKeyFromSecret(secret) {
@@ -119,15 +123,14 @@ export async function generateToken(env, sys) {
 }
 
 export async function checkAuth(request, env, sys) {
-  return verifyToken(extractBearerToken(request), env, sys);
+  if (await verifyToken(extractBearerToken(request), env, sys)) {
+    return true;
+  }
+  return verifyToken(getCookieValue(request, AUTH_COOKIE_NAME), env, sys);
 }
 
 export async function checkWebSocketAuth(request, env, sys) {
   if (await checkAuth(request, env, sys)) {
-    return true;
-  }
-
-  if (await verifyToken(getCookieValue(request, AUTH_COOKIE_NAME), env, sys)) {
     return true;
   }
 
@@ -146,7 +149,7 @@ export async function checkWebSocketAuth(request, env, sys) {
   return false;
 }
 
-export function buildAuthCookie(request, token, maxAge = 604800) {
+export function buildAuthCookie(request, token, maxAge = AUTH_COOKIE_MAX_AGE) {
   const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
   return `${AUTH_COOKIE_NAME}=${encodeURIComponent(token || '')}; Max-Age=${maxAge}; Path=/; HttpOnly; SameSite=Lax${secure}`;
 }
@@ -156,36 +159,21 @@ export function buildClearAuthCookie(request) {
   return `${AUTH_COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax${secure}`;
 }
 
-export async function validateCredentials(request, env, sys) {
+// ua 允许分号、逗号、空格等字符，必须编码后再写入 Cookie 头。
+export function buildUaCookie(request, ua, maxAge = AUTH_COOKIE_MAX_AGE) {
+  const value = encodeURIComponent(String(ua ?? '').trim());
+  if (!value) return '';
+  const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
+  return `${UA_COOKIE_NAME}=${value}; Max-Age=${maxAge}; Path=/; HttpOnly; SameSite=Lax${secure}`;
+}
+
+export function buildClearUaCookie(request) {
+  const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
+  return `${UA_COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax${secure}`;
+}
+
+export async function validateCredentials(username, password, env, sys) {
   try {
-    const authHeader = request.headers.get('Authorization');
-    if (!authHeader) {
-      return { valid: false, needsPasswordUpgrade: false };
-    }
-
-    const parts = authHeader.trim().split(/\s+/);
-    const scheme = parts[0];
-    const encoded = parts[1];
-
-    if (scheme !== 'Basic' || !encoded) {
-      return { valid: false, needsPasswordUpgrade: false };
-    }
-
-    let decoded;
-    try {
-      decoded = atob(encoded);
-    } catch (e) {
-      return { valid: false, needsPasswordUpgrade: false };
-    }
-
-    const idx = decoded.indexOf(':');
-    if (idx === -1) {
-      return { valid: false, needsPasswordUpgrade: false };
-    }
-
-    const username = decoded.slice(0, idx);
-    const password = decoded.slice(idx + 1);
-
     const validUsername = (sys && sys.username && sys.username.length > 0)
       ? sys.username
       : (typeof env.API_USER_NAME === 'string' && env.API_USER_NAME.length > 0)

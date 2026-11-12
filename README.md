@@ -10,12 +10,12 @@
   <a href="README-en.md">English</a>
 </p>
 
-[![Workers](https://img.shields.io/badge/Workers-2.8.5%20Beta1-f38020?style=flat-square&logo=cloudflare&logoColor=white)](version.json)
+[![Workers](https://img.shields.io/badge/Workers-2.8.7%20Stable-f38020?style=flat-square&logo=cloudflare&logoColor=white)](version.json)
 [![GitHub Stars](https://img.shields.io/github/stars/huilang-me/CF-Server-Monitor?style=flat-square&logo=github)](https://github.com/huilang-me/CF-Server-Monitor/stargazers)
 [![GitHub Forks](https://img.shields.io/github/forks/huilang-me/CF-Server-Monitor?style=flat-square&logo=github)](https://github.com/huilang-me/CF-Server-Monitor/forks)
 [![License](https://img.shields.io/badge/License-MIT-16a34a?style=flat-square)](#许可证)
 
-[在线演示](https://demo.huilang.me/) · [API 文档](API.md) · [Go 探针文档](https://github.com/huilang-me/cfsm-agent) · [主题开发](theme-develop.md)
+[在线演示](https://demo.huilang.me/) · [API 文档](API.md) · [Go 探针文档](https://github.com/huilang-me/cfsm-agent) · [主题开发](theme-develop.md) · [主题开发 AI 提示词](theme-ai-prompt.md)
 
 </div>
 
@@ -23,7 +23,7 @@
 
 CF-Server-Monitor 是一个部署在 Cloudflare Workers 上的服务器监控系统。服务器端安装 Agent 后会单向上报指标到 Worker，数据写入 D1，并通过 Durable Objects + WebSocket 推送到前端，实现免费托管、低维护的实时监控。
 
-支持主流 Linux 发行版、Alpine Linux、OpenWrt、macOS、群晖 DSM、飞牛 fnOS、Windows 等系统。
+支持主流 Linux 发行版、Alpine Linux、OpenWrt、macOS、群晖 DSM、飞牛 fnOS、Windows 等系统，并提供 Docker 镜像部署方式。
 
 高安全性：Agent 仅单向上报指标，不提供 WebSSH、远程命令下发或主控通道；支持非 root 运行，可降低监控组件被利用后的影响范围。
 
@@ -66,11 +66,11 @@ CF-Server-Monitor 是一个部署在 Cloudflare Workers 上的服务器监控系
 | 历史数据      | 7 天历史图表、长时段采样、实时网速、月流量统计与校正                                                      |
 | 网络质量      | 电信、联通、移动、BGP 节点延迟与丢包率追踪；三网详情开启时首页从 D1 最近 2 小时抽样最多 20 个真实点并缓存 5 分钟 |
 | 多视图前台     | 条形图、环形图、表格、地图视图，支持桌面端和移动端                                                        |
-| 管理后台      | 服务器增删改查、拖拽排序、隐藏服务器、导入导出、批量删除、数据库维护                                               |
-| 多系统 Agent | 主流 Linux、Alpine Linux、OpenWrt、群晖 DSM、飞牛 fnOS、FreeBSD、macOS、Windows；默认 Go 版本，保留 Shell/PowerShell 版本 |
+| 管理后台      | 服务器增删改查、拖拽排序、隐藏服务器、导入导出、批量删除、刷新服务器列表缓存、数据库维护                                               |
+| 多系统 Agent | 主流 Linux、Alpine Linux、OpenWrt、群晖 DSM、飞牛 fnOS、FreeBSD、macOS、Windows，支持 Docker 镜像部署；默认 Go 版本，保留 Shell/PowerShell 版本 |
 | 实时推送      | Durable Objects + WebSocket，Agent 上报后前端即时刷新                                      |
 | 告警通知      | 离线告警、恢复通知、到期提醒、资源负载告警                                                            |
-| 多语言       | 前端内置中文和英文切换；文档提供中文与英文入口                                                          |
+| 多语言       | 前端内置简体中文、繁體中文、English、日本語、Bahasa Indonesia、Français、Español 切换；通知消息支持同样 7 种语言；文档提供中文与英文入口              |
 | 多站点       | 支持 GitHub Pages 静态前台和多个 Worker API 聚合展示                                          |
 | 小组件       | 提供 iOS Scriptable 小组件脚本，适合移动端快速查看                                                |
 | 安全控制      | API Secret、管理员密码、JWT、Turnstile、CORS、CSP 白名单                                      |
@@ -95,8 +95,13 @@ flowchart LR
 3. Worker 校验 `API_SECRET`，写入 D1，并通过 Durable Object 广播实时数据。
 4. 前台大盘、详情页、管理后台和 iOS 小组件读取同一套 API。
 
+## 版本说明
+
 近期变化：
 
+- `2.8.7`：优化定时任务逻辑，降低CPU负载，避免超出免费额度限制；`/update` 增加 512KB 请求体上限，超限直接返回 413；服务器被删除后，其 Agent 的 WSS 连接会在 2 分钟内自动断开；WSS 上报增加帧大小校验，D1 抖动时不再中断已认证会话；批量样本只保留最新 300 条。新增服务端自动发现机制自动绑定服务器ID。新增自定义UA；导入导出包含设置选项；资源负载告警新增 TCP/UDP 连接数监控。上报未探到公网 IP 时用请求头来源地址补位
+- `2.8.6`：WSS前端订阅采用250毫秒批量上报，新增SMTP通知渠道，新增月度流量阈值告警，移除旧版数据库兼容性，新增Docker安装方式。
+- `2.8.5`：支持自定义 Ping 节点名称；增加ICMP模式；优化WSS响应逻辑；API接口优化；原皮前端优化；新增4个ping节点。
 - `2.8.4`：新增 Agent WSS 上报和 WSS 开启时段，提升实时数据推送及时性，并允许非目标时段自动改用 POST 降低 Do 时长消耗；该能力要求 Agent 升级到 `v1.0.10+`。新增账户Do用量展示，优化无前端订阅时的 Do 实时广播请求，降低空闲额度消耗。通知设置新增自定义 Webhook 渠道, 新增前端wss超时配置。
 - `2.8.3`：新增磁盘 IO 统计，默认 Agent 切换为 Go 版本，新增服务器延迟与丢包率实时窗口。
 - `2.8.2`：引入 Go Agent 支持。
@@ -120,14 +125,14 @@ Go Agent 的完整更新记录见 [cfsm-agent releases](https://github.com/huila
 
 这是推荐方式，适合希望通过 Cloudflare 控制台自动构建和重新部署的用户。
 
-1. Fork 本仓库到自己的 GitHub 账号。
-2. 进入 Cloudflare Dashboard，打开 Workers & Pages。
-3. 创建 Worker，并选择从 GitHub 仓库导入本项目。
+图文教程：<https://huilang.me/cf-server-monitor-setup/>
+
+1. 打开项目地址[CF-Server-Monitor](https://github.com/huilang-me/CF-Server-Monitor/), 老规矩，右上角来个Star，然后点[Fork](https://github.com/huilang-me/CF-Server-Monitor/fork)
+2. 进入 Cloudflare Dashboard，打开 [Workers & Pages](https://dash.cloudflare.com/?to=/:account/workers-and-pages)。
+3. [创建 Worker](https://dash.cloudflare.com/?to=/:account/workers-and-pages/create)，并选择从 GitHub 仓库导入本项目。
 4. 构建命令填写 `npm run build:frontend`。
 5. 部署命令使用 `npx wrangler deploy`。
 6. 部署完成后，在 Worker 的 Variables and Secrets 中添加 `API_SECRET`。
-
-图文教程：<https://huilang.me/cf-server-monitor-setup/>
 
 ### 方式二：GitHub Actions 自动部署
 
@@ -189,7 +194,27 @@ https://你的 Worker 域名/admin#/admin
 4. 点击复制按钮，选择目标系统和 Agent 版本。
 5. 在目标服务器上执行复制出的安装命令。
 
-建议优先使用后台生成的命令，因为它会自动带上服务器 ID、Worker URL、Secret、上报间隔、网络质量节点和网卡等参数。
+如果服务器数量较多，也可以在「设置 → 站点设置」中开启 **自动发现**：安装 Agent 时不传 `-id`，首次上报时服务端会自动创建服务器，名称取 `-name` 参数，未传则使用请求的连接来源 IP（`CF-Connecting-IP`）。若已存在同名服务器则不会新建也不会复用，服务端直接拒绝本次上报（返回 404），Agent 输出提示后直接退出。新建的服务器最多延迟约 2 分钟出现在首页；建号失败、或服务端未开启自动发现（空 `id` 上报只收到普通 404）时，同样只输出一条提示后退出，不重试、不发送通知，也不留下任何标记文件。该开关默认关闭。
+
+自动发现开关保存后，后台「站点设置 → 自动发现」旁会出现复制按钮，可直接复制下面这种不传 `-id` 的 Linux 安装命令。
+
+不传 `-id` 时的安装命令（Linux、OpenWrt、Synology DSM、FreeBSD、macOS）：
+
+```bash
+# 名称取本机公网 IP
+curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sh -s -- install -secret=SECRET -url=WORKER_URL
+
+# 指定名称
+curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sh -s -- install -secret=SECRET -url=WORKER_URL -name=hk-1
+```
+
+Windows（管理员 PowerShell），同样去掉 `-id`：
+
+```powershell
+$script = "$env:TEMP\install-cf-probe.ps1"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.ps1" -OutFile $script -UseBasicParsing
+PowerShell -ExecutionPolicy Bypass -File $script install -secret=SECRET -url=WORKER_URL -name=hk-1
+```
 
 ## Agent 参数与安全建议
 
@@ -201,7 +226,8 @@ V2.8.3 起默认使用独立项目 [cfsm-agent](https://github.com/huilang-me/cf
 
 | 参数                            | 说明                           | 默认值  |
 | ----------------------------- | ---------------------------- | ---- |
-| `-id`                         | 服务器唯一 ID                     | 必填   |
+| `-id`                         | 服务器唯一 ID                     | 必填（开启自动发现时可省略） |
+| `-name`                       | 自动建号时的服务器名称                   | 连接来源 IP（`CF-Connecting-IP`） |
 | `-secret`                     | Agent 上报密钥，需要等于 `API_SECRET` | 必填   |
 | `-url`                        | Worker 上报地址                  | 必填   |
 | `-collect_interval`           | 本机采集间隔；`0` 表示不额外采样           | `0`  |
@@ -215,13 +241,35 @@ V2.8.3 起默认使用独立项目 [cfsm-agent](https://github.com/huilang-me/cf
 
 ### 非 root 安装（推荐）
 
-支持 `systemd --user` 的 Linux 环境建议优先使用非 root 安装，可避免 Agent 长期以 root 身份运行，大幅提高安全性。非 root 安装会使用当前用户，并将文件写入 `~/.cf-probe/`，自启动依赖 `systemd --user`。如果希望用户退出登录后服务仍可运行，请先由 root 执行：
+支持 `systemd --user` 的 Linux 环境建议使用非 root 安装。后台安装命令可选择“当前用户”或“专用 cfsm 用户”：当前用户会直接执行安装，专用用户则会自动创建并切换到 `cfsm`。文件保存在该用户的 `~/.cf-probe/`。
+
+普通用户安装后，如需退出登录仍保持服务运行，请由 root 执行：
 
 ```bash
 loginctl enable-linger 用户名
 ```
 
-如果从旧 root 安装切换到非 root 安装，建议先用 root 卸载旧版，再切换到目标用户执行后台复制的安装命令。OpenWrt、Alpine/OpenRC、Synology DSM 等不支持 `systemd --user` 的环境，按后台生成的对应系统命令安装即可。
+卸载时请选择原来的安装用户。OpenWrt、Alpine/OpenRC、Synology DSM 等不支持 `systemd --user` 的环境，请使用对应系统命令。
+
+### Docker 部署
+
+后台复制安装命令的目标系统支持选择 Docker，会生成如下容器命令（服务器 ID、Secret、Worker 地址已按当前服务器自动填充，镜像标签默认 `latest`，可在 Agent 版本栏自定义）：
+
+```bash
+docker run -d --name cf-probe --restart=unless-stopped --network=host --pid=host --cap-drop=ALL --cap-add=NET_RAW \
+  -v cf-probe-data:/data \
+  -v /etc/os-release:/etc/os-release:ro \
+  -e SERVER_ID=<服务器ID> -e SECRET='<API_SECRET>' -e WORKER_URL=https://<你的后台地址>/update \
+  ghcr.io/huilang-me/cfsm-agent:latest
+```
+
+群晖 DSM 需要额外挂载版本文件，否则面板只能显示镜像内的系统名：在命令中追加 `-v /etc/defaults/VERSION:/etc/defaults/VERSION:ro`。
+
+采集间隔、上报间隔、Ping 节点、网卡、流量重置日、上下行校正等运行参数由 Agent 按 `SERVER_ID` 从后台动态拉取，无需在命令中重复指定；更换镜像标签即回退/升级到指定版本。卸载容器：
+
+```bash
+docker rm -f cf-probe && docker volume rm cf-probe-data
+```
 
 ## 配置说明
 
@@ -255,9 +303,9 @@ npm run build:github-page
 
 | 分类            | 主要内容                                  |
 | ------------- | ------------------------------------- |
-| 站点设置          | 标题、背景、favicon、默认展示模式、默认外观、默认语言、三网详情、公开访问策略 |
+| 站点设置          | 标题、背景、favicon、默认展示模式、默认外观、默认语言、三网详情、公开访问策略、自动发现（可复制免 ID 的 Linux 安装命令） |
 | 服务器参数         | HTTP/WSS 上报间隔、采集间隔、Ping 节点、网卡、月流量、价格、到期时间、自动续费 |
-| 安全设置          | 管理员账号密码、JWT Secret、Turnstile          |
+| 安全设置          | 管理员账号密码、JWT Secret、自定义 UA、Turnstile     |
 | 通知设置          | 离线告警、到期提醒、资源负载告警、测试通知                 |
 | 外观设置          | 自定义 CSS、`<head>`、CSP 白名单、Mikus 模式     |
 | 数据库管理         | 升级数据库、清空历史数据                          |
@@ -277,9 +325,15 @@ npm run build:github-page
 
 小组件会显示在线状态、CPU、内存、磁盘、月流量、实时上下行速率和更新时间。iOS 会按系统策略决定实际刷新频率。
 
+三个脚本都支持 `CONFIG.userAgent`：如果启用了上文「Cloudflare 安全规则」，需要把它填成后台的自定义 UA，否则小组件的请求会被质询拦截。留空则使用 Scriptable 的默认 UA。
+
+需要一次看多台时用 [scripts/ios-scriptable-widget-multi.js](scripts/ios-scriptable-widget-multi.js)：Parameter 留空显示面板上所有公开服务器，填 `server-a,server-b` 只显示这几台，只填一台时显示详细视图（带三网延迟柱状图）。服务器会自动分页（小、中尺寸每页 1 台，大尺寸每页 2 台），Parameter 填 `page:2`（也支持 `p2`、`2`、`第2页`）可指定页码，适合智能叠放。它请求的是 `/api/servers`（全站列表），服务器较多时会比单机版产生更多 D1 查询。
+
 ## 通知与告警
 
-在管理后台 -> 全局设置 -> 通知 中配置。通知分为“内置渠道”和“自定义 Webhook”两种渠道；选择自定义 Webhook 后，后端只会发送 Webhook，不会再调用内置渠道。
+在管理后台 -> 全局设置 -> 通知 中配置。通知分为“内置渠道”、“SMTP 邮件”和“自定义 Webhook”三种渠道；选择自定义 Webhook 后，后端只会发送 Webhook，不会再调用内置渠道。
+
+“通知语言”决定告警消息（事件名称和消息内容）使用中文、英文还是西班牙语，默认中文。自定义模板和 Webhook 内容中的固定文字不会被翻译。
 
 ### 内置渠道
 
@@ -296,6 +350,24 @@ npm run build:github-page
 | Server 酱    | `https://sctapi.ftqq.com/<SendKey>.send` 或 `server:https://example.com/<SendKey>.send` | 留空          |
 | WxPusher    | `https://wxpusher.zjiecode.com/api/send/message/[SPT_xxx]/Hello` | 留空          |
 | Gotify      | `https://gotify.example.com/message?token=xxx`                   | 留空          |
+
+### SMTP 邮件
+
+选择“SMTP 邮件”渠道后，在设置面板填写 SMTP 服务器、端口、加密方式、用户名、密码、发件人和收件人即可，无需手动拼接配置。后端会将其序列化为 `smtp://` 前缀协议存入 `tg_bot_token` 字段，并通过 [`cloudflare-smtp`](https://github.com/Bruol/cloudflare-smtp)（基于 `cloudflare:sockets`）直连邮件服务器发送纯文本邮件。
+
+配置格式（前端自动生成，手动填写内置渠道 Bot Token 时亦可使用）：
+
+```text
+smtp://<用户名>:<密码>@<host>:<port>?from=<发件人>&to=<收件人1,收件人2>&secure=<auto|tls|starttls>
+```
+
+注意事项：
+
+- **Cloudflare Workers 永久封禁 25 端口出站**，只能使用 `465`（隐式 TLS）或 `587`（STARTTLS）；`secure` 缺省时按端口自动选择。
+- 用户名、密码中的特殊字符需 URL 编码（例如 `@` 写作 `%40`），前端表单会自动处理。
+- QQ 邮箱、163 邮箱等需使用 **SMTP 授权码**而非登录密码；发件人留空时默认等于用户名。
+- 当前仅发送纯文本邮件（不支持 HTML、附件、抄送），发送失败会按 `NOTIFICATION_MAX_RETRIES` 自动重试。
+- 能否成功送达还取决于邮件服务商对 Cloudflare 出口 IP 及 SPF / DKIM 的校验策略。
 
 ### 自定义 Webhook
 
@@ -342,7 +414,7 @@ npm run build:github-page
 
 - 离线告警：节点离线达到设定阈值后通知，恢复后发送恢复通知。
 - 到期提醒：服务器到期前 1 到 7 天内，按通知时区和到期通知时间每天提醒，也可关闭。
-- 资源负载告警：按 CPU、内存、磁盘、上下行速率等指标配置规则。
+- 资源负载告警：按 CPU、内存、磁盘、上下行速率、TCP/UDP 连接数等指标配置规则。
 
 配置后请先点击发送测试通知，再保存配置。
 
@@ -367,6 +439,47 @@ npm run build:github-page
 
 可在后台启用 Cloudflare Turnstile，用于降低公开 API 和登录入口被刷的风险。多站点模式下，如果多个站点都启用 Turnstile，请保持 Site Key 一致。
 
+### Cloudflare 安全规则
+
+探针域名被扫描器反复请求时，每次请求都会计入 Workers 请求额度。可以让 Cloudflare 在请求到达 Worker 之前先做一次质询：只放行携带自定义 UA 的 Agent，以及登录后台后携带 `cfsm_ua` Cookie 的浏览器，其余请求全部质询。
+
+**前提**
+
+- 域名已托管在 Cloudflare 并绑定到 Worker。
+- Agent 版本 ≥ `1.1.1`，Workers 版本 ≥ `2.8.7`。
+
+**步骤**
+
+1. 进入后台 → 设置 → 安全设置 → 自定义 UA，填入一段自定义字符串（下文示例统一用 `myUa/name`），保存。
+2. 等待几分钟，让新 UA 通过 `/update` 响应头或 WSS ack 下发到所有 Agent，再继续下一步。
+3. 进入 Cloudflare 仪表盘 → 选择已绑定的域名 → 安全性 → 安全规则 → 创建规则：
+   - **表达式**（域名和 UA 换成你自己的值）：
+
+     ```
+     (http.host eq "tz.example.com" and http.user_agent ne "myUa/name" and not http.cookie contains "cfsm_ua=myUa%2Fname")
+     ```
+
+   - **操作**：托管质询（Managed Challenge）或 JavaScript 质询。
+
+   表达式含义：只对「探针域名 + UA 不是自定义 UA + 没有后台登录 Cookie」的请求发起质询。Agent 靠 UA 放行，已登录的浏览器靠 `cfsm_ua` Cookie 放行。
+
+4. 保存后，用无痕窗口访问探针域名应看到质询页；登录后台后不再质询。
+
+**关于 `cfsm_ua` Cookie**
+
+- 登录成功时服务端会同时下发 `cfsm_ua`，值为后台设置的自定义 UA，属性为 `HttpOnly; Path=/; SameSite=Lax`，有效期与登录态一致（7 天）。
+- 值会做 URL 编码后写入，`myUa/name` 实际是 `myUa%2Fname`，规则里要匹配**编码后**的形式。
+- 退出登录时一并清除，未登录不会存在；上线本功能前已登录的会话需要重新登录一次才会带上。
+
+**注意事项**
+
+- `http.host` 必须与探针实际访问的完整主机名一致（如 `tz.example.com`）。写成根域名规则不会命中探针，写成通配或包含则会把同域下的其他服务一起质询。
+- **规则启用后不要再直接修改后台的自定义 UA**。改了 UA 而规则没跟着改，Agent 的上报会被全部质询。正确顺序是：暂停规则 → 修改 UA → 等待几分钟下发到 Agent → 同步修改规则里的 UA 和编码后的 Cookie 值 → 重新启用规则。
+- iOS Scriptable 小组件、自建脚本和第三方 API 调用不携带后台登录 Cookie，会被这条规则拦截。需要这些调用在请求头里带上 `User-Agent: <自定义 UA>` 才能放行。
+- 启用质询后，可以关掉后台的「启用 Turnstile 人机验证码（全局）」，避免同一个请求被验证两次。
+- 这条规则用于降低扫描噪音：`cfsm_ua` 是固定字符串，可被伪造，不能当作访问控制手段。
+- 未登录时打开后台，页面会先过一次质询；登录请求依赖这次质询留下的 `cf_clearance`，如果质询已过期导致登录没反应，刷新页面重新通过一次即可。
+
 ### CORS
 
 默认建议仅同源访问。如果需要独立前台或多站点聚合，在 `CORS_ALLOWED_ORIGINS` 中加入可信来源。
@@ -382,14 +495,17 @@ npm run build:github-page
 项目内置默认主题，并支持：
 
 - 深色 / 浅色显示
-- 前台中文 / 英文切换
+- 前台多语言切换（7 种语言）
 - 自定义背景图、favicon、CSS、`<head>`
 - Mikus 模式
 - 主题商店
 - 第三方主题 GitHub tree 地址
 - 管理员预览主题
 
-第三方主题只反代主题仓库中的 `index.html` 与 `assets/`，管理后台仍使用内置主题。开发自定义主题请参考 [theme-develop.md](theme-develop.md)。
+第三方主题只反代主题仓库中的 `index.html` 与 `assets/`，管理后台仍使用内置主题。开发自定义主题请参考：
+
+- [theme-ai-prompt.md](theme-ai-prompt.md)：主题开发 AI 提示词，开发者直接整段粘贴给 AI 编码助手使用，内含数据流、D1 消耗铁律和完工自查清单
+- [theme-develop.md](theme-develop.md)：完整 API 字段定义与鉴权说明
 
 ## 升级与维护
 
@@ -516,6 +632,16 @@ wrangler d1 execute server-monitor-db --file=test/mock-data.sql
 
 更多本地测试说明见 [test/README.md](test/README.md)。
 
+### 定时任务
+
+```
+https://localhost:8787/cdn-cgi/handler/scheduled?cron=*/1+*+*+*+* // 每分钟执行一次（离线检测）
+https://localhost:8787/cdn-cgi/handler/scheduled?cron=0+*+*+*+* // 每小时执行一次（合并任务）
+https://localhost:8787/cdn-cgi/handler/scheduled?cron=0+0+*+*+0 // 每周执行一次（测试使用）
+https://localhost:8787/cdn-cgi/handler/scheduled?cron=0+12+*+*+* // 每天12点执行一次（测试使用）
+```
+
+
 ### API 检查
 
 ```bash
@@ -539,10 +665,12 @@ CF-Server-Monitor/
 │   ├── handlers/            # Worker 路由处理
 │   ├── middleware/          # 鉴权中间件
 │   ├── services/            # 通知服务
+│   ├── shared/              # 前后端共用常量（语言清单等）
 │   └── utils/               # 缓存、CORS、CSP、指标处理、版本检查
 ├── test/                    # 本地测试和模拟数据工具
 ├── API.md                   # REST / WebSocket API 文档
 ├── theme-develop.md         # 第三方主题开发文档
+├── theme-ai-prompt.md       # 主题开发 AI 提示词（粘贴给 AI 使用）
 ├── wrangler.toml            # 本地 Wrangler 配置
 └── version.json             # Worker / Agent 版本
 ```
@@ -579,6 +707,10 @@ CF-Server-Monitor/
 
 进入 Cloudflare D1 数据库 `server-monitor-db`，打开 `setting` 表，编辑 `site_options` 的 `password` 字段。旧版 MD5 兼容值 `e10adc3949ba59abbe56e057f20f883e` 对应密码 `123456`，保存后可用该密码登录，再到后台重新设置强密码。
 
+### 未托管在CF的域名不能绑定
+
+可以通过部署[CFSM-PROXY](https://github.com/huilang-me/CFSM-PROXY) Pages项目实现反代，绑定未托管在CF的域名
+
 ### 国内服务器无法上报
 
 建议绑定自定义域名到 Worker。无法绑定时，可临时通过 hosts 指向可用的 Cloudflare CDN IP：
@@ -586,6 +718,8 @@ CF-Server-Monitor/
 ```bash
 echo <CF_CDN_IP> <你的探针域名> | sudo tee -a /etc/hosts
 ```
+
+如果使用[CFSM-PROXY](https://github.com/huilang-me/CFSM-PROXY)的用户，请手动修改安装命令的url参数为绑定的域名
 
 ### Ping 结果异常或全是 1
 
@@ -624,8 +758,9 @@ echo <CF_CDN_IP> <你的探针域名> | sudo tee -a /etc/hosts
 ## 相关文档
 
 - [API.md](API.md)：REST API、WebSocket、鉴权、错误码和数据结构
-- [https://github.com/huilang-me/cfsm-agent](cfsm-agent)：Go 版本 Agent 配置、升级、日志与排障
+- [cfsm-agent](https://github.com/huilang-me/cfsm-agent)：Go 版本 Agent 配置、升级、日志与排障
 - [theme-develop.md](theme-develop.md)：第三方主题开发
+- [theme-ai-prompt.md](theme-ai-prompt.md)：主题开发 AI 提示词，直接粘贴给 AI 即可按项目规范开发主题
 - [test/README.md](test/README.md)：本地模拟数据和测试流程
 
 ## 社区
@@ -642,6 +777,10 @@ echo <CF_CDN_IP> <你的探针域名> | sudo tee -a /etc/hosts
 </p>
 
 - 微信赞赏：扫码支持
+
+### 合作与推荐
+
+如果你需要粤港澳大湾区的机场接送、商务用车或私人包车服务，可参考 [Hong Kong Chauffeur](https://hkchauffeur.com/)，覆盖香港、深圳、广州、珠海、澳门等地区。
 
 ## 致谢
 
