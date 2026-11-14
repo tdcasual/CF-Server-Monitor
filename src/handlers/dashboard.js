@@ -1,4 +1,4 @@
-import { checkAuth, simpleAuthResponse } from '../middleware/auth.js';
+import { checkAuth, hasAppPasswordAccess, simpleAuthResponse } from '../middleware/auth.js';
 import { getDashboardLatencyHistory, getLatestMetrics, getLatestMetricsForAllServers } from '../database/schema.js';
 import { getAllServers, getServerDetail } from '../utils/cache.js';
 import { mergeMetricsIntoServer, coerceNumericMetricFields } from '../utils/metrics.js';
@@ -15,6 +15,21 @@ import {
   DASHBOARD_LATENCY_WINDOW_POINTS,
   DASHBOARD_LATEST_REPORT_ID_CHUNK_SIZE
 } from '../utils/config.js';
+
+const PROBE_FIELDS = ['ct', 'cu', 'cm', 'bd', 'node_1', 'node_2', 'node_3', 'node_4'];
+
+// REST 接口中，丢包值为 null 表示该探针没有可用样本；此时隐藏对应的延迟和丢包字段。
+export function omitNullLossProbeFields(item) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+  const result = { ...item };
+  for (const field of PROBE_FIELDS) {
+    if (result[`loss_${field}`] === null) {
+      delete result[`loss_${field}`];
+      delete result[`ping_${field}`];
+    }
+  }
+  return result;
+}
 
 function createEmptyLatencyWindow() {
   return { ping: [], loss: [] };
@@ -165,8 +180,10 @@ async function getRealtimeStateForServers(env, serverIds) {
 
 export async function handleServerAPI(request, env, sys) {
   const isLoggedIn = await checkAuth(request, env, sys);
+  // App 口令只放宽可见范围（私有站点、隐藏服务器），与登录态等价，不涉及管理操作。
+  const canViewPrivate = isLoggedIn || hasAppPasswordAccess(request, sys);
   
-  if (sys.is_public !== 'true' && !isLoggedIn) {
+  if (sys.is_public !== 'true' && !canViewPrivate) {
     return simpleAuthResponse();
   }
   markFrontendRealtimeActive();
@@ -176,7 +193,7 @@ export async function handleServerAPI(request, env, sys) {
   
   if (!id) return createBadRequestResponse('Missing ID');
   
-  const server = await getServerDetail(env.DB, id, isLoggedIn);
+  const server = await getServerDetail(env.DB, id, canViewPrivate);
   if (!server) return createNotFoundResponse('Server not found');
   
   const [latestMetrics, realtimeState] = await Promise.all([
@@ -189,18 +206,19 @@ export async function handleServerAPI(request, env, sys) {
     long_history_points: Number(normalizeLongHistoryPoints(sys.long_history_points))
   };
   
-  return createSuccessResponse(withoutPrivateServerFields(server));
+  return createSuccessResponse(omitNullLossProbeFields(withoutPrivateServerFields(server)));
 }
 
 export async function handleServersAPI(request, env, sys) {
   const isLoggedIn = await checkAuth(request, env, sys);
+  const canViewPrivate = isLoggedIn || hasAppPasswordAccess(request, sys);
   
-  if (sys.is_public !== 'true' && !isLoggedIn) {
+  if (sys.is_public !== 'true' && !canViewPrivate) {
     return simpleAuthResponse();
   }
   markFrontendRealtimeActive();
   
-  const results = (await getAllServers(env.DB, isLoggedIn)).map(withoutPrivateServerFields);
+  const results = (await getAllServers(env.DB, canViewPrivate)).map(withoutPrivateServerFields);
   const shouldIncludeLatencyHistory = sys.show_three_net_details === 'true';
   
   const serverIds = results.map(server => server.id).filter(Boolean);
@@ -264,6 +282,14 @@ export async function handleServersAPI(request, env, sys) {
       show_expire: sys.show_expire === 'true',
       show_tf: sys.show_tf === 'true',
       show_three_net_details: sys.show_three_net_details === 'true',
+      custom_ct_name: sys.custom_ct_name || '电信',
+      custom_cu_name: sys.custom_cu_name || '联通',
+      custom_cm_name: sys.custom_cm_name || '移动',
+      custom_bd_name: sys.custom_bd_name || 'BGP',
+      node_1_name: sys.node_1_name || 'Node 1',
+      node_2_name: sys.node_2_name || 'Node 2',
+      node_3_name: sys.node_3_name || 'Node 3',
+      node_4_name: sys.node_4_name || 'Node 4',
       display_mode: sys.display_mode || 'bar',
       latency_window: {
         points: DASHBOARD_LATENCY_WINDOW_POINTS,
