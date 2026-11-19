@@ -1,8 +1,8 @@
 import { getAllServers, getLatestMetricsCache, setLatestMetricsCache, getMetricsHistoryCache, setMetricsHistoryCache, getCacheDuration, clearAllCaches } from '../utils/cache.js';
-import { saveSiteOptions, debug, getSettingByKey, normalizeLongHistoryPoints, DEFAULT_LONG_HISTORY_POINTS } from '../utils/settings.js';
+import { saveSiteOptions, debug, normalizeLongHistoryPoints, DEFAULT_LONG_HISTORY_POINTS } from '../utils/settings.js';
 import { attachDiskMetricsObject, flattenDiskMetrics, isDisabledProbeMetric, normalizeProbeMetricRow } from '../utils/metrics.js';
 import { ensureServerOptimization, buildHistoryId, getServerHistoryInfo, getHistoryIdRange } from './indexOptimization.js';
-import { addHistoryColumns, ensureHistoryIndex, isHistoryOptimized } from './updateDatabase.js';
+import { addHistoryColumns } from './updateDatabase.js';
 import {
   buildSparseHistoryQuery,
   shouldUseSparseHistorySampling
@@ -16,14 +16,14 @@ import {
   DASHBOARD_LATENCY_WINDOW_CACHE_TTL_MS,
   DASHBOARD_LATENCY_WINDOW_HOURS,
   DASHBOARD_LATENCY_WINDOW_POINTS,
-  DASHBOARD_LATENCY_WINDOW_QUERY_CONCURRENCY
+  DASHBOARD_LATENCY_WINDOW_BATCH_SIZE
 } from '../utils/config.js';
 
 let dbInitialized = false;
 
-const LOSS_AGG_COLUMNS = new Set(['loss_ct', 'loss_cu', 'loss_cm', 'loss_bd']);
+const LOSS_AGG_COLUMNS = new Set(['loss_ct', 'loss_cu', 'loss_cm', 'loss_bd', 'loss_node_1', 'loss_node_2', 'loss_node_3', 'loss_node_4']);
 const DEFAULT_HISTORY_MAX_POINTS = 160;
-const LATENCY_NODE_FIELDS = ['ct', 'cu', 'cm', 'bd'];
+const LATENCY_NODE_FIELDS = ['ct', 'cu', 'cm', 'bd', 'node_1', 'node_2', 'node_3', 'node_4'];
 const DASHBOARD_LATENCY_COLUMNS = LATENCY_NODE_FIELDS
   .flatMap(field => [`ping_${field}`, `loss_${field}`]);
 const dashboardLatencyHistoryCache = new Map();
@@ -63,7 +63,6 @@ export async function initDatabase(db) {
         )
       `).run();
       await saveSiteOptions(db, { servers_optimized: 'true' });
-      await saveSiteOptions(db, { history_id_optimized: 'true' });
     }
 
     // 判断servers表是否存在
@@ -86,6 +85,8 @@ export async function initDatabase(db) {
           expire_date TEXT DEFAULT '',
           traffic_limit TEXT DEFAULT '',
           traffic_calc_type TEXT DEFAULT 'total',
+          traffic_alert_percent INTEGER DEFAULT NULL,
+          traffic_alert_state TEXT,
           "interface" TEXT DEFAULT '',
           reset_day INTEGER DEFAULT 1,
           collect_interval INTEGER DEFAULT 0,
@@ -98,6 +99,10 @@ export async function initDatabase(db) {
           custom_cu TEXT DEFAULT '',
           custom_cm TEXT DEFAULT '',
           custom_bd TEXT DEFAULT '',
+          node_1 TEXT DEFAULT '',
+          node_2 TEXT DEFAULT '',
+          node_3 TEXT DEFAULT '',
+          node_4 TEXT DEFAULT '',
           rx_correction REAL DEFAULT NULL,
           tx_correction REAL DEFAULT NULL,
           offline_notify_disabled TEXT DEFAULT '0',
@@ -112,15 +117,8 @@ export async function initDatabase(db) {
       await ensureServerOptimization(db);
     }
 
-    // 判断metrics_history表是否存在
-    const historyTableExists = await db.prepare(`
-      SELECT name FROM sqlite_master WHERE type='table' AND name='metrics_history'
-    `).first();
-    if (!historyTableExists) {
-      await db.prepare(createHistoryTableSql('metrics_history')).run();
-    }else{
-      await ensureHistoryIndex(db);
-    }
+    // 确保 metrics_history 表存在（主键 id 已编码分区与时间，无需二级索引）
+    await db.prepare(createHistoryTableSql('metrics_history')).run();
 
     debug('✅ 数据库初始化完成');
     dbInitialized = true;
@@ -143,8 +141,6 @@ export async function clearHistory(db) {
     
     await initDatabase(db);
 
-    await saveSiteOptions(db, { history_id_optimized: 'true' });
-
     await clearAllCaches(db);
     clearDashboardLatencyHistoryCache();
     
@@ -164,35 +160,11 @@ export async function clearHistory(db) {
   }
 }
 
-async function hasHistoryServerTimeIndex(db, tableName) {
-  const index = await db.prepare(`
-    SELECT name
-    FROM sqlite_master
-    WHERE type = 'index'
-      AND tbl_name = ?
-      AND sql IS NOT NULL
-      AND LOWER(sql) LIKE '%server_id%'
-      AND LOWER(sql) LIKE '%timestamp%'
-    LIMIT 1
-  `).bind(tableName).first();
-
-  return !!index;
-}
-
-function buildHistorySourceQuery(tableName, useIdRange, columns) {
-  if (useIdRange) {
-    return `
-      SELECT timestamp, ${columns} FROM ${tableName}
-      WHERE id >= ?
-        AND id <= ?
-    `;
-  }
-
+function buildHistorySourceQuery(tableName, columns) {
   return `
     SELECT timestamp, ${columns} FROM ${tableName}
-    WHERE server_id = ?
-      AND typeof(timestamp) = 'integer'
-      AND timestamp >= ?
+    WHERE id >= ?
+      AND id <= ?
   `;
 }
 
@@ -234,24 +206,10 @@ export async function getMetricsHistory(
     `SELECT name FROM sqlite_master WHERE type='table' AND name='metrics_history_old'`
   ).first();
 
-  const history_id_optimized = await getSettingByKey(db, 'history_id_optimized', true);
-  const currentHasServerTimeIndex = history_id_optimized
-    ? false
-    : await hasHistoryServerTimeIndex(db, 'metrics_history');
-  const currentUsesIdRange = history_id_optimized || !currentHasServerTimeIndex;
-  const oldUsesIdRange = oldTableExists
-    ? history_id_optimized || !await hasHistoryServerTimeIndex(db, 'metrics_history_old')
-    : false;
-  const needsIdRange = currentUsesIdRange || oldUsesIdRange;
-
-  let idRange = null;
-  if (needsIdRange) {
-    if (!historyInfo.partitionId) {
-      throw new Error('Invalid history partition id');
-    }
-
-    idRange = getHistoryIdRange(historyInfo.partitionId, queryStart);
+  if (!historyInfo.partitionId) {
+    throw new Error('Invalid history partition id');
   }
+  const idRange = getHistoryIdRange(historyInfo.partitionId, queryStart);
 
   const columnList = columns.split(',').map(c => c.trim()).filter(c => c && c !== 'timestamp');
   const sourceColumns = columnList.join(', ');
@@ -263,12 +221,7 @@ export async function getMetricsHistory(
     LOSS_AGG_COLUMNS.has(col) ? `${col}_bucket_max AS ${col}` : col
   );
 
-  const useSparseSampling = shouldUseSparseHistorySampling(
-    queryHours,
-    currentUsesIdRange,
-    oldTableExists,
-    oldUsesIdRange
-  );
+  const useSparseSampling = shouldUseSparseHistorySampling(queryHours);
   const sparseQueryEnd = Math.floor(now / 1000) * 1000 + 1000;
   const maxPoints = queryHours > 1
     ? configuredLongHistoryPoints
@@ -323,21 +276,13 @@ export async function getMetricsHistory(
     const sourceQueries = [];
     const bindValues = [];
 
-    sourceQueries.push(buildHistorySourceQuery('metrics_history', currentUsesIdRange, sourceColumns));
-    if (currentUsesIdRange) {
-      bindValues.push(idRange.startId, idRange.endId);
-    } else {
-      bindValues.push(serverId, queryStart);
-    }
+    sourceQueries.push(buildHistorySourceQuery('metrics_history', sourceColumns));
+    bindValues.push(idRange.startId, idRange.endId);
 
     if (oldTableExists) {
       debug('[History] 跨周查询，合并 metrics_history 和 metrics_history_old');
-      sourceQueries.push(buildHistorySourceQuery('metrics_history_old', oldUsesIdRange, sourceColumns));
-      if (oldUsesIdRange) {
-        bindValues.push(idRange.startId, idRange.endId);
-      } else {
-        bindValues.push(serverId, queryStart);
-      }
+      sourceQueries.push(buildHistorySourceQuery('metrics_history_old', sourceColumns));
+      bindValues.push(idRange.startId, idRange.endId);
     }
 
     bindValues.push(intervalMs);
@@ -499,59 +444,105 @@ export async function getDashboardLatencyHistory(db, servers, options = {}) {
     `SELECT name FROM sqlite_master WHERE type='table' AND name='metrics_history_old'`
   ).first();
 
-  const fetchServerLatency = async server => {
+  const queryStart = cutoff;
+  const intervalMs = Math.max(10_000, Math.ceil((queryEnd - queryStart) / points));
+  const firstRangeEnd = Math.min(queryEnd, queryStart + intervalMs);
+  const items = [];
+
+  // 窗口由 now/points 决定，与服务器无关：无效窗口直接给所有服务器返回空数据
+  if (queryStart >= queryEnd) {
+    for (const server of serversToFetch) {
+      const serverId = String(server?.id || '').trim();
+      if (serverId) result.set(serverId, { ping: [], loss: [] });
+    }
+    return result;
+  }
+
+  // 结果落盘只有这两个出口：窗口 + 缓存，避免同样的样板散落在四条路径上
+  const applyWindow = (serverId, rows) => {
+    const window = normalizeDashboardLatencyWindow(rows, { queryStart, intervalMs, points });
+    result.set(serverId, window);
+    if (useCache) {
+      dashboardLatencyHistoryCache.set(serverId, { cachedAt: now, window });
+    }
+  };
+  const applyEmpty = serverId => {
+    const empty = { ping: [], loss: [] };
+    result.set(serverId, empty);
+    if (useCache) {
+      dashboardLatencyHistoryCache.set(serverId, { cachedAt: now, window: empty });
+    }
+  };
+
+  for (const server of serversToFetch) {
     const serverId = String(server?.id || '').trim();
-    if (!serverId) return;
+    if (!serverId) continue;
 
     try {
       const historyInfo = await getServerHistoryInfo(db, serverId, server);
       if (!historyInfo.partitionId) {
         result.set(serverId, { ping: [], loss: [] });
-        return;
+        continue;
       }
 
-      const queryStart = cutoff;
-      if (queryStart >= queryEnd) {
-        result.set(serverId, { ping: [], loss: [] });
-        return;
-      }
-
-      const intervalMs = Math.max(10_000, Math.ceil((queryEnd - queryStart) / points));
       const idPrefix = getHistoryIdRange(historyInfo.partitionId).startId;
       const sparseQuery = buildSparseHistoryQuery({
         columns,
         queryStart,
         queryEnd,
-        firstRangeEnd: Math.min(queryEnd, queryStart + intervalMs),
+        firstRangeEnd,
         intervalMs,
         idPrefix,
         oldTableExists,
         tableBoundary: thisSunday.getTime(),
         sampleOrder: 'DESC'
       });
-
-      const rawResult = await db.prepare(sparseQuery.sql).bind(...sparseQuery.bindValues).all();
-      const window = normalizeDashboardLatencyWindow(rawResult.results, { queryStart, intervalMs, points });
-      result.set(serverId, window);
-      if (useCache) {
-        dashboardLatencyHistoryCache.set(serverId, { cachedAt: now, window });
-      }
+      items.push({ serverId, sparseQuery });
     } catch (e) {
       debug('[DashboardLatency] query failed:', serverId, e?.message || e);
-      const empty = { ping: [], loss: [] };
-      result.set(serverId, empty);
-      if (useCache) {
-        dashboardLatencyHistoryCache.set(serverId, { cachedAt: now, window: empty });
+      applyEmpty(serverId);
+    }
+  }
+
+  for (let offset = 0; offset < items.length; offset += DASHBOARD_LATENCY_WINDOW_BATCH_SIZE) {
+    const chunk = items.slice(offset, offset + DASHBOARD_LATENCY_WINDOW_BATCH_SIZE);
+    let batchResults;
+    try {
+      batchResults = await db.batch(chunk.map(item =>
+        db.prepare(item.sparseQuery.sql).bind(...item.sparseQuery.bindValues)
+      ));
+      if (!Array.isArray(batchResults)) {
+        throw new TypeError('db.batch() returned a non-array result');
+      }
+    } catch (batchError) {
+      debug('[DashboardLatency] batch query failed, falling back to per-server query:', batchError?.message || batchError);
+      await Promise.all(chunk.map(async item => {
+        try {
+          const rawResult = await db.prepare(item.sparseQuery.sql).bind(...item.sparseQuery.bindValues).all();
+          applyWindow(item.serverId, rawResult.results);
+        } catch (e) {
+          debug('[DashboardLatency] query failed:', item.serverId, e?.message || e);
+          applyEmpty(item.serverId);
+        }
+      }));
+      continue;
+    }
+
+    for (let index = 0; index < chunk.length; index++) {
+      const { serverId } = chunk[index];
+      // 单台后处理异常只降级这一台，不能穿透到 /api/servers 让整页失败
+      try {
+        const rows = batchResults[index]?.results;
+        if (!Array.isArray(rows)) {
+          applyEmpty(serverId);
+          continue;
+        }
+        applyWindow(serverId, rows);
+      } catch (e) {
+        debug('[DashboardLatency] apply batch result failed:', serverId, e?.message || e);
+        applyEmpty(serverId);
       }
     }
-  };
-
-  for (let offset = 0; offset < serversToFetch.length; offset += DASHBOARD_LATENCY_WINDOW_QUERY_CONCURRENCY) {
-    await Promise.all(
-      serversToFetch
-        .slice(offset, offset + DASHBOARD_LATENCY_WINDOW_QUERY_CONCURRENCY)
-        .map(fetchServerLatency)
-    );
   }
 
   return result;
@@ -561,17 +552,6 @@ export async function getDashboardLatencyHistory(db, servers, options = {}) {
 export async function weeklyCleanup(db) {
   try {
     debug('[Cleanup] 开始执行表轮换操作...');
-    
-    // 判断metrics_history有无索引
-    const index = await db.prepare(
-      `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='metrics_history'`
-    ).first();
-    if(!index){
-      await saveSiteOptions(db, { history_id_optimized: 'true' });
-      debug('✅ 切换到优化模式');
-    }else{
-      debug('✅ 继续兼容模式');
-    }
     
     // 1. 删除旧的 metrics_history_old 表（如果存在）
     await db.prepare(`DROP TABLE IF EXISTS metrics_history_old`).run();
@@ -652,10 +632,18 @@ export async function saveMetricsHistory(db, serverId, historyPartitionId, metri
     parsePing(metrics.ping_cu),
     parsePing(metrics.ping_cm),
     parsePing(metrics.ping_bd),
+    parsePing(metrics.ping_node_1),
+    parsePing(metrics.ping_node_2),
+    parsePing(metrics.ping_node_3),
+    parsePing(metrics.ping_node_4),
     parseLoss(metrics.loss_ct),
     parseLoss(metrics.loss_cu),
     parseLoss(metrics.loss_cm),
     parseLoss(metrics.loss_bd),
+    parseLoss(metrics.loss_node_1),
+    parseLoss(metrics.loss_node_2),
+    parseLoss(metrics.loss_node_3),
+    parseLoss(metrics.loss_node_4),
     parseFloat(metrics.ram_total) || 0,
     parseFloat(metrics.ram_used) || 0,
     parseFloat(metrics.swap_total) || 0,
@@ -707,25 +695,17 @@ export async function getLatestMetrics(db, serverId, server = null) {
       throw new Error('Invalid history partition id');
     }
 
-    const useIdFilter = await isHistoryOptimized(db);
-
     const rangeStart = historyInfo.startTimestamp > 0 ? historyInfo.startTimestamp : null;
     const { startId, endId } = getHistoryIdRange(historyInfo.partitionId, rangeStart);
     debug(`Server ${serverId} history_id_range: ${startId} - ${endId}`);
   
-    const result = useIdFilter ? await db.prepare(`
+    const result = await db.prepare(`
       SELECT * FROM metrics_history
       WHERE id >= ?
         AND id <= ?
       ORDER BY id DESC
       LIMIT 1
-    `).bind(startId, endId).first()
-    :await db.prepare(`
-      SELECT * FROM metrics_history
-      WHERE server_id = ?
-      ORDER BY timestamp DESC
-      LIMIT 1
-    `).bind(serverId).first();
+    `).bind(startId, endId).first();
     return result ? normalizeProbeMetricRow(result) : null;
   } catch (e) {
     console.error('获取最新指标数据失败:', e);
@@ -733,6 +713,15 @@ export async function getLatestMetrics(db, serverId, server = null) {
   }
 }
 
+// 每批合并的服务器数量：通过 db.batch() 一次发送多条语句，减少 D1 往返次数
+const LATEST_QUERY_CHUNK_SIZE = 30;
+
+/**
+ * 获取所有服务器的最新完整指标行（供仪表盘/管理端合并展示）。
+ * 命中"完整指标"缓存时直接返回；未命中时每台服务器在主键 rowid 范围内取最新一行，
+ * 每批最多 LATEST_QUERY_CHUNK_SIZE 台，通过 db.batch() 合并成一次 D1 往返，
+ * 避免逐台 N 次查询与 N 次往返。单台 history 范围异常只跳过该台，与 getLatestMetrics 行为一致。
+ */
 export async function getLatestMetricsForAllServers(db) {
   const now = Date.now();
   const cacheInfo = getLatestMetricsCache();
@@ -740,24 +729,138 @@ export async function getLatestMetricsForAllServers(db) {
     return cacheInfo.cache;
   }
 
-  // 确保 metrics_history 表有 idx_history_server_time 索引
-  await ensureHistoryIndex(db);
-
+  const result = new Map();
   try {
     const servers = await getAllServers(db);
+    if (servers.length === 0) {
+      setLatestMetricsCache(result);
+      return result;
+    }
 
-    const entries = await Promise.all(
-      servers.map(s =>
-        getLatestMetrics(db, s.id, s).then(metrics => [s.id, metrics])
-      )
-    );
+    // 先逐台计算 history rowid 范围：单台异常只跳过该台（与 getLatestMetrics 逐台失败一致）
+    const items = [];
+    for (const server of servers) {
+      try {
+        // 传入 server 对象时 getServerHistoryInfo 不会触发额外查询
+        const historyInfo = await getServerHistoryInfo(db, server.id, server);
+        if (!historyInfo.partitionId) continue;
+        const rangeStart = historyInfo.startTimestamp > 0 ? historyInfo.startTimestamp : null;
+        const { startId, endId } = getHistoryIdRange(historyInfo.partitionId, rangeStart);
+        items.push({ server, startId, endId });
+      } catch (err) {
+        debug(`Server ${server.id} history 范围计算失败，跳过: ${err.message}`);
+      }
+    }
 
-    const result = new Map(entries.filter(([, m]) => m !== null));
+    for (let offset = 0; offset < items.length; offset += LATEST_QUERY_CHUNK_SIZE) {
+      const chunk = items.slice(offset, offset + LATEST_QUERY_CHUNK_SIZE);
+      let batchResults;
+      try {
+        batchResults = await db.batch(chunk.map(item =>
+          db.prepare(
+            'SELECT * FROM metrics_history WHERE id >= ? AND id <= ? ORDER BY id DESC LIMIT 1'
+          ).bind(item.startId, item.endId)
+        ));
+      } catch (batchError) {
+        // 整批失败时回退逐台查询，保持"单台异常不影响其它台"的既有语义
+        debug(`批量获取最新指标失败，回退逐台查询: ${batchError.message}`);
+        for (const item of chunk) {
+          const metrics = await getLatestMetrics(db, item.server.id, item.server);
+          if (metrics) result.set(item.server.id, metrics);
+        }
+        continue;
+      }
+      for (let index = 0; index < chunk.length; index++) {
+        const rows = batchResults[index] && batchResults[index].results;
+        if (rows && rows.length > 0) {
+          result.set(chunk[index].server.id, normalizeProbeMetricRow(rows[0]));
+        }
+      }
+    }
+
     setLatestMetricsCache(result);
     return result;
   } catch (e) {
     console.error('获取所有服务器最新指标数据失败:', e);
-    const cacheInfo = getLatestMetricsCache();
-    return cacheInfo.cache || new Map();
+    const fallback = getLatestMetricsCache();
+    return fallback.cache || new Map();
+  }
+}
+
+// 从"完整指标"缓存中抽取每台服务器的最新上报时间戳（完整行是轻量结果的超集）
+function extractTimestampsFromMetricsCache(cache, servers = null) {
+  const map = new Map();
+  if (!cache) return map;
+  if (servers) {
+    for (const server of servers) {
+      const metrics = cache.get(server.id);
+      if (metrics) map.set(server.id, metrics.timestamp);
+    }
+    return map;
+  }
+  for (const [id, metrics] of cache) {
+    if (metrics) map.set(id, metrics.timestamp);
+  }
+  return map;
+}
+
+/**
+ * 获取所有服务器的最新上报时间戳（只查 timestamp 一列）。
+ * 供离线检测等只需时间戳的场景使用，避免拉取整行 52 列带来的序列化 CPU 开销。
+ * 命中"完整指标"缓存时直接复用；未命中才轻量查询，且不写回共享缓存，避免用残缺行污染它。
+ * 每台服务器用 rowid 范围在主键索引上定位最新一行，每批最多 LATEST_QUERY_CHUNK_SIZE 台，
+ * 通过 db.batch() 合并成一次 D1 往返（注意：D1 的 compound SELECT 项数上限极低，不能用 UNION ALL）。
+ * 可传入已筛选的 servers，复用调用方列表并只读取这些节点（包括缓存回退）。
+ *
+ * @returns {Promise<Map|null>} 成功返回 Map<serverId, timestamp>（可能为空 Map）；
+ *   查询失败且无可回退缓存时返回 null，调用方应跳过本次检测，避免误判为全部离线。
+ */
+export async function getLatestTimestampsForAllServers(db, { servers = null } = {}) {
+  const now = Date.now();
+  const cacheInfo = getLatestMetricsCache();
+  if (cacheInfo.cache && now - cacheInfo.time < cacheInfo.ttl) {
+    return extractTimestampsFromMetricsCache(cacheInfo.cache, servers);
+  }
+
+  const collected = new Map();
+  try {
+    const targetServers = servers ?? await getAllServers(db);
+    if (targetServers.length === 0) return collected;
+
+    const items = [];
+    for (const server of targetServers) {
+      try {
+        // 传入 server 对象时 getServerHistoryInfo 不会触发额外查询
+        const historyInfo = await getServerHistoryInfo(db, server.id, server);
+        if (!historyInfo.partitionId) continue; // 无效分区，跳过（与 getLatestMetrics 行为一致）
+        const rangeStart = historyInfo.startTimestamp > 0 ? historyInfo.startTimestamp : null;
+        const { startId, endId } = getHistoryIdRange(historyInfo.partitionId, rangeStart);
+        items.push({ serverId: server.id, startId, endId });
+      } catch (err) {
+        // 单台服务器 history 范围异常不影响其它服务器（与 getLatestMetrics 逐台失败一致）
+        debug(`Server ${server.id} history 范围计算失败，跳过: ${err.message}`);
+      }
+    }
+
+    for (let offset = 0; offset < items.length; offset += LATEST_QUERY_CHUNK_SIZE) {
+      const chunk = items.slice(offset, offset + LATEST_QUERY_CHUNK_SIZE);
+      const batchResults = await db.batch(chunk.map(item =>
+        db.prepare(
+          'SELECT timestamp FROM metrics_history WHERE id >= ? AND id <= ? ORDER BY id DESC LIMIT 1'
+        ).bind(item.startId, item.endId)
+      ));
+      for (let index = 0; index < chunk.length; index++) {
+        const rows = batchResults[index] && batchResults[index].results;
+        if (rows && rows.length > 0) {
+          collected.set(chunk[index].serverId, rows[0].timestamp);
+        }
+      }
+    }
+    return collected;
+  } catch (e) {
+    console.error('获取所有服务器最新时间戳失败:', e);
+    // 查询失败时回退到（可能已过期的）完整缓存；无缓存则返回 null 让调用方跳过本次检测，
+    // 避免把查询失败误判为全部服务器离线而误发告警
+    return cacheInfo.cache ? extractTimestampsFromMetricsCache(cacheInfo.cache, servers) : null;
   }
 }
