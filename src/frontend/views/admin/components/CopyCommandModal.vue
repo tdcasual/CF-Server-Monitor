@@ -10,12 +10,42 @@
         <div class="form-group flex-1">
           <label class="form-label">{{ trans.targetOs }}</label>
           <select :value="targetOs" class="form-select" @change="$emit('update:target-os', $event.target.value)">
-            <option value="linux">Linux/OpenWrt/Synology DSM/FreeBSD/macOS</option>
+            <option value="linux">Linux (systemd)</option>
+            <option value="unix">OpenWrt/Alpine/Synology DSM/FreeBSD</option>
+            <option value="mac">macOS</option>
             <option value="windows">Windows</option>
+            <option value="docker">Docker</option>
           </select>
         </div>
 
         <div class="form-group flex-1">
+          <label class="form-label">
+            Agent {{ trans.version }}
+            <HelpTooltip :text="targetOs === 'docker' ? trans.dockerVersionTip : trans.installVersionTip" />
+          </label>
+          <input
+            type="text"
+            :value="installVersion"
+            class="form-input"
+            :placeholder="targetOs === 'docker' ? 'latest' : trans.installVersionPlaceholder"
+            @input="$emit('update:install-version', $event.target.value)"
+          >
+        </div>
+      </div>
+
+      <div v-if="targetOs !== 'docker'" class="form-row">
+        <div v-if="targetOs === 'linux'" class="form-group flex-1">
+          <label class="form-label">
+            {{ trans.installMode }}
+            <HelpTooltip :text="trans.nonRootInstallTip" />
+          </label>
+          <select :value="installMode" class="form-select" @change="$emit('update:install-mode', $event.target.value)">
+            <option value="current-user">{{ trans.installModeCurrentUser }}</option>
+            <option value="cfsm-user">{{ trans.installModeCfsmUser }}</option>
+          </select>
+        </div>
+
+        <div v-if="targetOs !== 'docker'" class="form-group flex-1">
           <label class="form-label">
             {{ trans.ghProxy }}
             <HelpTooltip :text="trans.ghProxyTip" />
@@ -32,6 +62,22 @@
             :placeholder="trans.ghProxyPlaceholder"
             @input="$emit('update:install-gh-proxy', $event.target.value)"
           >
+        </div>
+
+        <div class="form-group flex-1">
+          <label class="form-label">
+            {{ trans.installInstance }}
+            <HelpTooltip :text="trans.installInstanceTip" />
+          </label>
+          <input
+            type="text"
+            :value="installInstance"
+            class="form-input"
+            maxlength="32"
+            :placeholder="trans.installInstancePlaceholder"
+            @input="$emit('update:install-instance', $event.target.value)"
+          >
+          <p v-if="instanceHasInvalidChars" class="text-red text-sm">{{ trans.instanceNameInvalid }}</p>
         </div>
       </div>
 
@@ -69,22 +115,6 @@
           </span>
         </div>
         <div class="config-row">
-          <span class="config-label">{{ trans.customCt }}</span>
-          <span class="config-value">{{ isBlank(customCt) ? '-' : customCt }}</span>
-        </div>
-        <div class="config-row">
-          <span class="config-label">{{ trans.customCu }}</span>
-          <span class="config-value">{{ isBlank(customCu) ? '-' : customCu }}</span>
-        </div>
-        <div class="config-row">
-          <span class="config-label">{{ trans.customCm }}</span>
-          <span class="config-value">{{ isBlank(customCm) ? '-' : customCm }}</span>
-        </div>
-        <div class="config-row">
-          <span class="config-label">{{ trans.customBd }}</span>
-          <span class="config-value">{{ isBlank(customBd) ? '-' : customBd }}</span>
-        </div>
-        <div class="config-row">
           <span class="config-label">{{ trans.networkInterface }}</span>
           <span class="config-value">{{ isBlank(networkInterface) ? '-' : networkInterface }}</span>
         </div>
@@ -96,10 +126,28 @@
           <span class="config-label">{{ trans.txCorrection }} (GB)</span>
           <span class="config-value">{{ formatWithUnit(txCorrection, 'GB') }}</span>
         </div>
+        <div class="config-row">
+          <span class="config-label">{{ settings.custom_ct_name || trans.customCt }}</span>
+          <span class="config-value">{{ isBlank(customCt) ? '-' : customCt }}</span>
+        </div>
+        <div class="config-row">
+          <span class="config-label">{{ settings.custom_cu_name || trans.customCu }}</span>
+          <span class="config-value">{{ isBlank(customCu) ? '-' : customCu }}</span>
+        </div>
+        <div class="config-row">
+          <span class="config-label">{{ settings.custom_cm_name || trans.customCm }}</span>
+          <span class="config-value">{{ isBlank(customCm) ? '-' : customCm }}</span>
+        </div>
+        <div class="config-row">
+          <span class="config-label">{{ settings.custom_bd_name || 'BGP' }}</span>
+          <span class="config-value">{{ isBlank(customBd) ? '-' : customBd }}</span>
+        </div>
+        <div v-for="(node, index) in [node1, node2, node3, node4]" :key="index" class="config-row">
+          <span class="config-label">{{ settings[`node_${index + 1}_name`] || `Node ${index + 1}` }}</span><span class="config-value">{{ isBlank(node) ? '-' : node }}</span>
+        </div>
       </div>
 
       <div class="form-group">
-        <label class="form-label">{{ trans.installCommand }}</label>
         <div class="cmd-output-wrapper" :class="{ copied: copiedCmd }">
           <span class="cmd-prompt">{{ targetOs === 'windows' ? 'PS' : '$' }}</span>
           <pre class="cmd-output">{{ installCommand }}</pre>
@@ -108,7 +156,7 @@
 
       <div class="modal-footer flex-justify-between">
         <div class="flex items-center gap-2">
-          <button @click="$emit('copy-cmd')" class="btn btn-primary">{{ copiedCmd ? '✅ ' + trans.copied : '📋 ' + trans.copy }}</button> <button @click="$emit('open-edit-from-copy')" class="btn btn-blue">✏️ {{ trans.edit }}</button>
+          <button @click="$emit('copy-cmd')" class="btn btn-primary">{{ copiedCmd ? '✅ ' + trans.copied : '📋 ' + trans.copy }}</button> &nbsp; <button @click="$emit('open-edit-from-copy')" class="btn btn-blue">✏️ {{ trans.edit }}</button>
         </div>
         <button @click="$emit('close')" class="btn">{{ trans.cancel }}</button>
       </div>
@@ -119,13 +167,18 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import HelpTooltip from '../../../components/HelpTooltip.vue'
+import { hasInvalidInstanceChars } from '../../../utils/instance-command.js'
 
 const props = defineProps({
   trans: { type: Object, required: true },
+  settings: { type: Object, default: () => ({}) },
   show: { type: Boolean, default: false },
   currentServerName: { type: String, default: '' },
   targetOs: { type: String, default: 'linux' },
+  installMode: { type: String, default: 'current-user' },
   installGhProxy: { type: String, default: '' },
+  installVersion: { type: String, default: '' },
+  installInstance: { type: String, default: '' },
   collectInterval: { type: [Number, String], default: 0 },
   reportInterval: { type: [Number, String], default: 60 },
   wssReportInterval: { type: [Number, String], default: 2 },
@@ -135,6 +188,7 @@ const props = defineProps({
   customCu: { type: String, default: '' },
   customCm: { type: String, default: '' },
   customBd: { type: String, default: '' },
+  node1: { type: String, default: '' }, node2: { type: String, default: '' }, node3: { type: String, default: '' }, node4: { type: String, default: '' },
   networkInterface: { type: String, default: '' },
   resetDay: { type: [Number, String], default: 1 },
   rxCorrection: { type: [Number, String], default: '' },
@@ -149,7 +203,10 @@ const emit = defineEmits([
   'copy-cmd',
   'open-edit-from-copy',
   'update:target-os',
-  'update:install-gh-proxy'
+  'update:install-mode',
+  'update:install-gh-proxy',
+  'update:install-version',
+  'update:install-instance'
 ])
 
 const CUSTOM_GH_PROXY_VALUE = '__custom__'
@@ -186,7 +243,12 @@ const selectedGhProxy = computed({
 })
 
 const showCustomGhProxy = computed(() => selectedGhProxy.value === CUSTOM_GH_PROXY_VALUE)
-const effectivePingMode = computed(() => props.pingMode === 'icmp' ? 'icmp' : 'tcp')
+const instanceHasInvalidChars = computed(() => hasInvalidInstanceChars(props.installInstance))
+const effectivePingMode = computed(() => (
+  props.targetOs === 'linux' && props.installMode === 'cfsm-user'
+    ? 'tcp'
+    : (props.pingMode === 'icmp' ? 'icmp' : 'tcp')
+))
 
 watch(
   () => props.show,
