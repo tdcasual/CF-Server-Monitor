@@ -10,11 +10,14 @@
       :password-visible="passwordVisible"
       :login-error="loginError"
       :login-loading="loginLoading"
+      :passkey-available="passkeyAvailable"
+      :passkey-status="passkeyLoginStage"
       :turnstile-site-key="turnstileSiteKey"
       :turnstile-login-enabled="turnstileLoginEnabled"
       :turnstile-enabled="turnstileEnabled"
       :turnstile-verified="turnstileVerified"
       @login="handleLogin"
+      @passkey-login="handlePasskeyLogin"
       @toggle-password="togglePassword"
       @api-index-change="handleApiIndexChange"
     />
@@ -81,22 +84,27 @@
             class="tab-btn"
             :class="{ active: activeTab === 'servers' }"
             @click="activeTab = 'servers'"
-          >▸ {{ trans.servers }}</button>
+          >{{ trans.servers }}</button>
           <button
             class="tab-btn"
             :class="{ active: activeTab === 'settings' }"
             @click="activeTab = 'settings'"
-          >▸ {{ trans.settings }}</button>
+          >{{ trans.settings }}</button>
           <button
             class="tab-btn"
             :class="{ active: activeTab === 'database' }"
             @click="activeTab = 'database'"
-          >▸ {{ trans.dbManagement }}</button>
+          >{{ trans.dbManagement }}</button>
           <button
             class="tab-btn"
             :class="{ active: activeTab === 'themeStore' }"
             @click="activeTab = 'themeStore'"
-          >▸ {{ trans.themeStore }}</button>
+          >{{ trans.themeStore }}</button>
+          <button
+            class="tab-btn"
+            :class="{ active: activeTab === 'donation' }"
+            @click="activeTab = 'donation'"
+          >{{ trans.donation }}</button>
         </div>
 
         <ServerTable
@@ -108,15 +116,17 @@
           :groups="groups"
           :active-tab="activeTab"
           :selected-api-index="selectedApiIndex"
-          :theme-url="settings.theme_url"
           :latest-agent-version="latestAgentVersion"
+          :cache-refreshing="cacheRefreshing"
           :copied-server-id="copiedServerId"
           :copied-note-server-id="copiedNoteServerId"
           :copied-spec-key="copiedSpecKey"
           @add-server="addServer"
+          @auto-discovery-cmd="openAutoDiscoveryModal"
           @batch-edit="openBatchEditModal"
           @batch-delete="batchDelete"
           @toggle-select-all="toggleSelectAll"
+          @refresh-cache="refreshServersCache"
           @select-all="handleSelectAll"
           @drag-start="handleDragStart"
           @drop="handleDrop"
@@ -136,6 +146,8 @@
           :password-visible="passwordVisible"
           :active-tab="activeTab"
           :selected-api-base="selectedApiBase"
+          :selected-api-index="selectedApiIndex"
+          :passkey-available="passkeyAvailable"
           :current-origin="currentOrigin"
           :saving="saving"
           :change-admin-password="changeAdminPassword"
@@ -149,6 +161,7 @@
           @upload-favicon="uploadFavicon"
           @send-test-notification="sendTestNotification"
           @query-d1-usage="queryD1Usage"
+          @alert-message="alertMessage = $event"
         />
 
         <DatabasePanel
@@ -168,6 +181,11 @@
           @theme-applied="settings.theme_url = $event"
           @theme-options-applied="handleThemeOptionsApplied"
           @alert-message="alertMessage = $event"
+        />
+
+        <DonationPanel
+          :trans="trans"
+          :active-tab="activeTab"
         />
       </div>
 
@@ -226,7 +244,10 @@
         :current-server-name="currentServerName"
         :delete-target-os="deleteTargetOs"
         :delete-version="deleteVersion"
+        :delete-install-mode="deleteInstallMode"
         :delete-gh-proxy="deleteGhProxy"
+        :delete-instance="deleteInstance"
+        :delete-all-instances="deleteAllInstances"
         :uninstall-command="getUninstallCommand()"
         :uninstall-copied="uninstallCopied"
         @close="closeDeleteModal"
@@ -234,15 +255,22 @@
         @copy-uninstall="copyUninstallCmd"
         @update:delete-target-os="deleteTargetOs = $event"
         @update:delete-version="deleteVersion = $event"
+        @update:delete-install-mode="deleteInstallMode = $event"
         @update:delete-gh-proxy="deleteGhProxy = $event"
+        @update:delete-instance="deleteInstance = $event"
+        @update:delete-all-instances="deleteAllInstances = $event"
       />
 
       <CopyCommandModal
         :trans="trans"
+        :settings="settings"
         :show="showCopyModal"
         :current-server-name="currentServerName"
         :target-os="targetOs"
+        :install-mode="installMode"
         :install-gh-proxy="installGhProxy"
+        :install-version="installVersion"
+        :install-instance="installInstance"
         :collect-interval="collectInterval"
         :report-interval="reportInterval"
         :wss-report-interval="wssReportInterval"
@@ -252,6 +280,10 @@
         :custom-cu="customCu"
         :custom-cm="customCm"
         :custom-bd="customBd"
+        :node-1="node1"
+        :node-2="node2"
+        :node-3="node3"
+        :node-4="node4"
         :network-interface="networkInterface"
         :reset-day="resetDay"
         :rx-correction="rxCorrection"
@@ -262,8 +294,34 @@
         @close="closeCopyModal"
         @copy-cmd="copyCustomCmd"
         @update:target-os="targetOs = $event"
+        @update:install-mode="installMode = $event"
         @update:install-gh-proxy="installGhProxy = $event"
+        @update:install-version="installVersion = $event"
+        @update:install-instance="installInstance = $event"
         @open-edit-from-copy="openEditModalFromCopy"
+      />
+
+      <AutoDiscoveryCommandModal
+        :trans="trans"
+        :show="showAutoDiscoveryModal"
+        :target-os="autoDiscoveryTargetOs"
+        :install-mode="autoDiscoveryInstallMode"
+        :name="autoDiscoveryName"
+        :instance="autoDiscoveryInstance"
+        :version="autoDiscoveryVersion"
+        :auto-update="autoDiscoveryAutoUpdate"
+        :gh-proxy="autoDiscoveryGhProxy"
+        :install-command="getAutoDiscoveryInstallCommand()"
+        :copied="autoDiscoveryCopied"
+        @close="closeAutoDiscoveryModal"
+        @copy-cmd="copyAutoDiscoveryCmd"
+        @update:target-os="autoDiscoveryTargetOs = $event"
+        @update:install-mode="autoDiscoveryInstallMode = $event"
+        @update:name="autoDiscoveryName = $event"
+        @update:instance="autoDiscoveryInstance = $event"
+        @update:version="autoDiscoveryVersion = $event"
+        @update:auto-update="autoDiscoveryAutoUpdate = $event"
+        @update:gh-proxy="autoDiscoveryGhProxy = $event"
       />
 
       <div id="dbModal" class="modal-overlay" :class="{ active: showDbModal }">
@@ -550,7 +608,8 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch, nextTick, inject } from 'vue'
+import { ref, computed, onMounted, onScopeDispose, watch, nextTick, inject } from 'vue'
+import { startAuthentication, WebAuthnAbortService } from '@simplewebauthn/browser'
 import { useRoute, useRouter } from 'vue-router'
 import TerminalHeader from '../../components/TerminalHeader.vue'
 import Footer from '../../components/Footer.vue'
@@ -560,17 +619,27 @@ import ServerTable from './components/ServerTable.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 import DatabasePanel from './components/DatabasePanel.vue'
 import ThemeStorePanel from './components/ThemeStorePanel.vue'
+import DonationPanel from './components/DonationPanel.vue'
 import EditServerModal from './components/EditServerModal.vue'
 import BatchEditServersModal from './components/BatchEditServersModal.vue'
 import DeleteServerModal from './components/DeleteServerModal.vue'
 import CopyCommandModal from './components/CopyCommandModal.vue'
-import { adminApi, login, logout as apiLogout, upgradeDatabase, clearHistory, getApiBases, fetchConfig } from '../../utils/api'
-import { hasMultipleApiBases } from '../../utils/config.js'
-import { t, useTranslation } from '../../utils/i18n'
+import AutoDiscoveryCommandModal from './components/AutoDiscoveryCommandModal.vue'
+import { adminApi, login, logout as apiLogout, upgradeDatabase, clearHistory, fetchConfig } from '../../utils/api'
+import { http, DEFAULT_REQUEST_TIMEOUT_MS } from '../../utils/http.js'
+import { createPasskeyLoginOptions } from '../../utils/passkeyLogin.js'
+import { hasMultipleApiBases, getApiBases } from '../../utils/config.js'
+import { copyTextToClipboard } from '../../utils/clipboard.js'
+import {
+  buildAutoDiscoveryInstallCommand,
+  buildCustomInstallCommand,
+  buildUninstallCommand
+} from '../../utils/install-command.js'
+import { normalizeLanguagePreference, normalizeNotificationLanguagePreference, t, useTranslation } from '../../utils/i18n'
 import { PING_NODE_FIELDS, validatePingNode } from '../../utils/pingNode.js'
 import { normalizeDisplayMode, resolveDisplayMode } from '../../utils/displayMode.js'
 import { applyMikusThemeOptions } from '../../utils/themeOptions.js'
-import { FRONTEND_WS_TIMEOUT_MINUTES_MAX, HISTORY } from '../../utils/constants.js'
+import { FRONTEND_WS_TIMEOUT_MINUTES_MAX, HISTORY, STORAGE } from '../../utils/constants.js'
 import { usePasswordVisibility } from '../../composables/usePasswordVisibility'
 import { useTurnstile } from './composables/useTurnstile'
 import { detectBillingCycle, detectCurrencySymbol, normalizeBillingCycle, normalizeCurrency, normalizePrice, renewExpireDateIfNeeded } from '../../utils/server.js'
@@ -631,21 +700,21 @@ const normalizeTgNotifySetting = (value) => {
   if (value === false || value === 'false' || value === undefined || value === null || value === '') return '0'
 
   const minutes = Number(value)
-  if (Number.isInteger(minutes) && (minutes === 0 || (minutes >= 2 && minutes <= 30))) {
-    return String(minutes)
-  }
-
-  return '0'
+  if (!Number.isInteger(minutes) || minutes < 0 || minutes > 30) return '0'
+  if (minutes === 0) return '0'
+  // 最小 5 分钟：低于 5 的历史值（如 2、3、4）统一提升到 5
+  return String(Math.max(minutes, 5))
 }
 
 const isTgNotifyEnabled = (value) => normalizeTgNotifySetting(value) !== '0'
 
+const EXPIRE_REMINDER_DAYS_MAX = 365
 const normalizeExpireReminderSetting = (value) => {
   if (value === true || value === 'true') return '7'
   if (value === false || value === 'false' || value === undefined || value === null || value === '') return '0'
 
   const days = Number(value)
-  if (Number.isInteger(days) && days >= 0 && days <= 7) {
+  if (Number.isInteger(days) && days >= 0 && days <= EXPIRE_REMINDER_DAYS_MAX) {
     return String(days)
   }
 
@@ -734,16 +803,23 @@ const normalizeResourceAlertIntervalSetting = (value) => {
 
 const normalizeResourceAlertMetricSetting = (value) => {
   const metric = String(value || '').trim()
-  return ['cpu', 'ram', 'disk', 'netIn', 'netOut'].includes(metric) ? metric : 'cpu'
+  return ['cpu', 'ram', 'disk', 'netIn', 'netOut', 'tcpConn', 'udpConn'].includes(metric) ? metric : 'cpu'
 }
 
-const defaultResourceAlertThreshold = (metric) => (
-  metric === 'netIn' || metric === 'netOut' ? '100' : '80'
-)
+const isConnectionAlertMetricSetting = (metric) => metric === 'tcpConn' || metric === 'udpConn'
+
+const defaultResourceAlertThreshold = (metric) => {
+  if (isConnectionAlertMetricSetting(metric)) return '1000'
+  return metric === 'netIn' || metric === 'netOut' ? '100' : '80'
+}
 
 const normalizeResourceAlertThresholdSetting = (value, metric) => {
   if (value === undefined || value === null || value === '') return defaultResourceAlertThreshold(metric)
   const number = Number(value)
+  if (isConnectionAlertMetricSetting(metric)) {
+    if (!Number.isFinite(number) || number <= 0 || number > 10000000) return defaultResourceAlertThreshold(metric)
+    return String(Math.round(number))
+  }
   const max = metric === 'netIn' || metric === 'netOut' ? 100000 : 100
   if (!Number.isFinite(number) || number <= 0 || number > max) return defaultResourceAlertThreshold(metric)
   return String(Math.round(number * 100) / 100)
@@ -794,10 +870,9 @@ const normalizePreferredThemeSetting = (value) => {
   return ['dark', 'light', 'auto'].includes(theme) ? theme : 'auto'
 }
 
-const normalizeDefaultLanguageSetting = (value) => {
-  const language = String(value || '').trim().toLowerCase()
-  return ['zh', 'en', 'auto'].includes(language) ? language : 'auto'
-}
+const normalizeDefaultLanguageSetting = (value) => normalizeLanguagePreference(value)
+
+const normalizeNotificationLanguageSetting = (value) => normalizeNotificationLanguagePreference(value)
 
 const formatThemeOptions = (value) => {
   const normalized = value === undefined || value === null ? {} : value
@@ -865,6 +940,13 @@ const normalizeApiIndex = (value) => {
 const selectedApiIndex = ref(normalizeApiIndex(route.query.apiIndex))
 const selectedApiBase = computed(() => apiBases[selectedApiIndex.value] || apiBases[0])
 const currentOrigin = computed(() => window.location.origin)
+const passkeyAvailable = computed(() => {
+  try {
+    return window.isSecureContext && !!window.PublicKeyCredential && new URL(selectedApiBase.value, window.location.href).origin === window.location.origin
+  } catch (_) {
+    return false
+  }
+})
 
 const syncApiIndexQuery = () => {
   if (!isMultipleMode.value) return
@@ -905,6 +987,7 @@ const settings = ref({
   preferred_theme: 'auto',
   default_language: 'auto',
   theme_options: '{}',
+  auto_discovery: false,
   is_public: false,
   show_price: true,
   show_expire: true,
@@ -917,9 +1000,11 @@ const settings = ref({
   tg_notify: '0',
   expire_reminder: '0',
   resource_alert_rules: [],
+  traffic_alert_threshold: 0,
   tg_bot_token: '',
   tg_chat_id: '',
   notification_timezone: 'UTC',
+  notification_language: 'zh',
   expire_notification_time: '12',
   notification_webhook_enabled: false,
   notification_webhook_url: '',
@@ -929,23 +1014,33 @@ const settings = ref({
   notification_webhook_body: '{\n  "title": "{{emoji}} {{event}}",\n  "content": "{{notification}}"\n}',
   notification_template: '{{emoji}}【CF Server Monitor】{{event}}\n\n{{message}}\n\n{{time}}',
   turnstile_enabled: false,
+  turnstile_login_enabled: false,
   turnstile_site_key: '',
   turnstile_secret_key: '',
   cloudflare_account_id: '',
   cloudflare_token: '',
   jwt_secret: '',
   username: '',
+  password_configured: false,
   password: '',
   confirm_password: '',
   custom_ct: '',
   custom_cu: '',
   custom_cm: '',
   custom_bd: '',
+  custom_ct_name: '电信',
+  custom_cu_name: '联通',
+  custom_cm_name: '移动',
+  custom_bd_name: 'BGP',
   theme_url: '',
   csp_static: '',
-  csp_api: ''
+  csp_api: '',
+  ua: 'cfsm',
+  app_password: ''
 })
 const apiSecret = ref('')
+const cacheRefreshing = ref(false)
+const savedAutoDiscovery = ref(false)
 const changeAdminPassword = ref(false)
 
 const clearAdminPasswordInputs = () => {
@@ -967,7 +1062,7 @@ const toggleAdminPasswordChange = () => {
 }
 
 const { visibility: passwordVisible, toggle: togglePassword } = usePasswordVisibility([
-  'login', 'tgBotToken', 'tgChatId', 'notificationWebhookUrl', 'turnstileSecret', 'cloudflareToken', 'jwtSecret', 'password', 'confirmPassword'
+  'login', 'tgBotToken', 'tgChatId', 'notificationWebhookUrl', 'smtpPassword', 'turnstileSecret', 'cloudflareToken', 'jwtSecret', 'ua', 'appPassword', 'password', 'confirmPassword'
 ])
 
 const {
@@ -976,6 +1071,37 @@ const {
   hasSharedTurnstileVerified, loadTurnstileConfig: loadTurnstileConfigBase,
   renderTurnstile, resetTurnstile, clearTurnstile
 } = useTurnstile()
+
+const loginConfigReady = ref(false)
+let loginConfigRequestVersion = 0
+const passkeyLoginStage = ref('')
+let passkeyLoginContext = 0
+let passkeyPromptActive = false
+const fetchPasskeyLoginOptions = async (apiIndex, includeTurnstile = true) => {
+  const result = await http.postByIndex('/admin/api', { action: 'passkey_login_options' }, apiIndex, {
+    autoRedirect: false, includeAuth: false, includeTurnstile, includeTurnstileVerified: false, timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS
+  })
+  if (result.status === 429) throw new Error('passkeyRateLimited')
+  if (result.error || !result.data?.options || !result.data?.challengeId) throw new Error(result.error || 'options')
+  return result.data
+}
+const preparedPasskeyOptions = createPasskeyLoginOptions(() => fetchPasskeyLoginOptions(selectedApiIndex.value, false))
+const canPreparePasskey = computed(() => loginConfigReady.value && !isLoggedIn.value && passkeyAvailable.value && !turnstileEnabled.value && !turnstileLoginEnabled.value)
+watch(selectedApiIndex, () => { loginConfigReady.value = false }, { flush: 'sync' })
+watch(() => [selectedApiIndex.value, isLoggedIn.value, passkeyAvailable.value, loginConfigReady.value, turnstileEnabled.value, turnstileLoginEnabled.value], () => {
+  passkeyLoginContext++
+  preparedPasskeyOptions.clear()
+  if (passkeyPromptActive) WebAuthnAbortService.cancelCeremony()
+  passkeyPromptActive = false
+  // Turnstile tokens are single use. Never consume one speculatively: the user
+  // may choose password login instead. There is no polling or automatic retry.
+  if (canPreparePasskey.value) preparedPasskeyOptions.prepare().catch(() => {})
+}, { flush: 'sync' })
+onScopeDispose(() => {
+  passkeyLoginContext++
+  preparedPasskeyOptions.clear()
+  if (passkeyPromptActive) WebAuthnAbortService.cancelCeremony()
+})
 
 const showEditModal = ref(false)
 const showBatchEditModal = ref(false)
@@ -994,6 +1120,7 @@ const editForm = ref({
   expire_date: '',
   traffic_limit: '',
   traffic_calc_type: 'total',
+  traffic_alert_percent: null,
   interface: '',
   reset_day: 1,
   collect_interval: 0,
@@ -1005,6 +1132,7 @@ const editForm = ref({
   custom_cu: '',
   custom_cm: '',
   custom_bd: '',
+  node_1: '', node_2: '', node_3: '', node_4: '',
   rx_correction: '',
   tx_correction: '',
   auto_update: false,
@@ -1023,6 +1151,7 @@ const createBatchEditDefaults = () => ({
   expire_date: '',
   traffic_limit: '',
   traffic_calc_type: 'total',
+  traffic_alert_percent: null,
   interface: '',
   reset_day: 1,
   collect_interval: 0,
@@ -1034,6 +1163,7 @@ const createBatchEditDefaults = () => ({
   custom_cu: '',
   custom_cm: '',
   custom_bd: '',
+  node_1: '', node_2: '', node_3: '', node_4: '',
   rx_correction: '',
   tx_correction: '',
   auto_update: false,
@@ -1052,7 +1182,10 @@ const copiedNoteServerId = ref(null)
 const copiedSpecKey = ref(null)
 const deleteTargetOs = ref('linux')
 const deleteVersion = ref('go')
+const deleteInstallMode = ref('current-user')
 const deleteGhProxy = ref('')
+const deleteInstance = ref('')
+const deleteAllInstances = ref(false)
 const uninstallCopied = ref(false)
 const saving = ref(false)
 
@@ -1078,7 +1211,10 @@ const showCopyModal = ref(false)
 const copyServerId = ref('')
 const currentServerName = ref('')
 const targetOs = ref('linux')
+const installMode = ref('current-user')
 const installGhProxy = ref('')
+const installVersion = ref('')
+const installInstance = ref('')
 const collectInterval = ref(0)
 const reportInterval = ref(60)
 const wssReportInterval = ref(2)
@@ -1088,12 +1224,26 @@ const customCt = ref('')
 const customCu = ref('')
 const customCm = ref('')
 const customBd = ref('')
+const node1 = ref('')
+const node2 = ref('')
+const node3 = ref('')
+const node4 = ref('')
+const explicitEmptyNodes = ref({})
 const networkInterface = ref('')
 const resetDay = ref(1)
 const rxCorrection = ref('')
 const txCorrection = ref('')
 const autoUpdate = ref(false)
 const copiedCmd = ref(false)
+const showAutoDiscoveryModal = ref(false)
+const autoDiscoveryTargetOs = ref('linux')
+const autoDiscoveryInstallMode = ref('current-user')
+const autoDiscoveryName = ref('')
+const autoDiscoveryInstance = ref('')
+const autoDiscoveryVersion = ref('')
+const autoDiscoveryAutoUpdate = ref(false)
+const autoDiscoveryGhProxy = ref('')
+const autoDiscoveryCopied = ref(false)
 
 const isWssReportEnabled = computed(() => settings.value.wss_report_enabled === true)
 const getEffectiveConnectionMode = (value) => {
@@ -1111,10 +1261,11 @@ watch(isWssReportEnabled, (enabled) => {
 })
 
 const getPingNodeLabel = (field) => ({
-  custom_ct: trans.value.customCt,
-  custom_cu: trans.value.customCu,
-  custom_cm: trans.value.customCm,
-  custom_bd: trans.value.customBd
+  custom_ct: settings.value.custom_ct_name || trans.value.customCt,
+  custom_cu: settings.value.custom_cu_name || trans.value.customCu,
+  custom_cm: settings.value.custom_cm_name || trans.value.customCm,
+  custom_bd: settings.value.custom_bd_name || 'BGP'
+  ,node_1: settings.value.node_1_name || 'Node 1', node_2: settings.value.node_2_name || 'Node 2', node_3: settings.value.node_3_name || 'Node 3', node_4: settings.value.node_4_name || 'Node 4'
 })[field] || field
 
 const getPingNodeValidation = (source) => {
@@ -1131,33 +1282,16 @@ const getPingNodeValidation = (source) => {
 
 const buildPingNodeError = (field) => `${getPingNodeLabel(field)}: ${trans.value.invalidPingNodeFormat}`
 
-const copyTextToClipboard = async (text) => {
-  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text)
-      return
-    } catch (e) {
-      // Fall back to the textarea path below.
-    }
-  }
-
-  const textarea = document.createElement('textarea')
-  textarea.value = text
-  textarea.setAttribute('readonly', '')
-  textarea.style.position = 'fixed'
-  textarea.style.opacity = '0'
-  document.body.appendChild(textarea)
-  textarea.select()
-  document.execCommand('copy')
-  document.body.removeChild(textarea)
-}
-
 const copyServerNote = async (server) => {
   const note = String(server?.note || '')
   if (!note.trim()) return
 
   try {
-    await copyTextToClipboard(note)
+    const copied = await copyTextToClipboard(note)
+    if (!copied) {
+      alertMessage.value = trans.value.httpsRequired
+      return
+    }
     copiedNoteServerId.value = server.id
     setTimeout(() => {
       if (copiedNoteServerId.value === server.id) {
@@ -1174,7 +1308,11 @@ const copyServerSpec = async ({ key, text } = {}) => {
   if (!key || !value || value === '-') return
 
   try {
-    await copyTextToClipboard(value)
+    const copied = await copyTextToClipboard(value)
+    if (!copied) {
+      alertMessage.value = trans.value.httpsRequired
+      return
+    }
     copiedSpecKey.value = key
     setTimeout(() => {
       if (copiedSpecKey.value === key) {
@@ -1186,7 +1324,18 @@ const copyServerSpec = async ({ key, text } = {}) => {
   }
 }
 
+const completeLogin = async () => {
+  loginForm.value.password = ''
+  isLoggedIn.value = true
+  syncApiIndexQuery()
+  clearTurnstile()
+  turnstileVerified.value = hasSharedTurnstileVerified()
+  await Promise.all([loadSettings(), loadServers(), loadLatestAgentVersion()])
+}
+
 const handleLogin = async () => {
+  if (loginLoading.value) return
+  preparedPasskeyOptions.clear()
   loginError.value = ''
   loginLoading.value = true
 
@@ -1204,15 +1353,7 @@ const handleLogin = async () => {
 
   const result = await login(loginForm.value.username, loginForm.value.password, turnstileToken.value, selectedApiIndex.value)
   if (!result.error) {
-    isLoggedIn.value = true
-    syncApiIndexQuery()
-    clearTurnstile()
-    turnstileVerified.value = hasSharedTurnstileVerified()
-    await Promise.all([
-      loadSettings(),
-      loadServers(),
-      loadLatestAgentVersion()
-    ])
+    await completeLogin()
   } else {
     loginError.value = result.status === 403 ? 'Please complete the verification' : trans.value.errorInvalidUsername
     loginForm.value.password = ''
@@ -1220,6 +1361,56 @@ const handleLogin = async () => {
     resetTurnstile('#admin-turnstile-container')
   }
   loginLoading.value = false
+}
+
+const handlePasskeyLogin = async () => {
+  if (loginLoading.value || !passkeyAvailable.value) return
+  loginError.value = ''
+  if ((turnstileLoginEnabled.value || (turnstileEnabled.value && !turnstileVerified.value)) && !turnstileToken.value) {
+    loginError.value = 'Please complete the verification'
+    return
+  }
+  loginLoading.value = true
+  const apiIndex = selectedApiIndex.value
+  const context = passkeyLoginContext
+  try {
+    let prepared = canPreparePasskey.value ? preparedPasskeyOptions.take() : null
+    if (!prepared) {
+      passkeyLoginStage.value = 'preparing'
+      if (turnstileToken.value) localStorage.setItem(STORAGE.TURNSTILE_TOKEN, turnstileToken.value)
+      if (canPreparePasskey.value) {
+        await preparedPasskeyOptions.prepare()
+        prepared = preparedPasskeyOptions.take()
+      } else {
+        prepared = await fetchPasskeyLoginOptions(apiIndex)
+      }
+    }
+    if (context !== passkeyLoginContext) return
+    if (!prepared) throw new Error('options')
+    passkeyLoginStage.value = 'browser'
+    passkeyPromptActive = true
+    const credential = await startAuthentication({ optionsJSON: prepared.options })
+    if (context !== passkeyLoginContext) return
+    passkeyPromptActive = false
+    passkeyLoginStage.value = 'verifying'
+    const result = await http.postByIndex('/admin/api', {
+      action: 'passkey_login_verify', challengeId: prepared.challengeId, credential
+    }, apiIndex, { autoRedirect: false, timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS })
+    if (context !== passkeyLoginContext) return
+    if (result.error || !result.data?.token) throw new Error(result.error || 'authentication')
+    localStorage.setItem(STORAGE.JWT_TOKEN, result.data.token)
+    await completeLogin()
+  } catch (error) {
+    if (context !== passkeyLoginContext) return
+    loginError.value = error?.message === 'passkeyRateLimited' ? trans.value.passkeyRateLimited : trans.value.passkeyFailed
+    clearTurnstile()
+    resetTurnstile('#admin-turnstile-container')
+  } finally {
+    preparedPasskeyOptions.clear()
+    passkeyPromptActive = false
+    passkeyLoginStage.value = ''
+    loginLoading.value = false
+  }
 }
 
 const logout = async () => {
@@ -1236,8 +1427,8 @@ const logout = async () => {
 }
 
 const checkLoginStatus = () => {
-  const token = localStorage.getItem('jwt_token')
-  return !!token
+  const token = localStorage.getItem(STORAGE.JWT_TOKEN)
+  return !!token || appConfig?.authorization === true
 }
 
 const initAdmin = async () => {
@@ -1245,7 +1436,7 @@ const initAdmin = async () => {
   if (hasCreds) {
     isLoggedIn.value = true
     syncApiIndexQuery()
-    const savedTurnstileToken = localStorage.getItem('turnstile_token')
+    const savedTurnstileToken = localStorage.getItem(STORAGE.TURNSTILE_TOKEN)
     if (savedTurnstileToken) {
       turnstileToken.value = savedTurnstileToken
     }
@@ -1260,7 +1451,12 @@ const initAdmin = async () => {
 }
 
 const loadTurnstileConfig = async () => {
-  await loadTurnstileConfigBase(selectedApiIndex.value, isMultipleMode.value, loginError)
+  const version = ++loginConfigRequestVersion
+  const apiIndex = selectedApiIndex.value
+  loginConfigReady.value = false
+  const ready = await loadTurnstileConfigBase(apiIndex, isMultipleMode.value, loginError)
+  if (version !== loginConfigRequestVersion || apiIndex !== selectedApiIndex.value) return
+  loginConfigReady.value = ready
   if (turnstileSiteKey.value && (turnstileLoginEnabled.value || (turnstileEnabled.value && !turnstileVerified.value))) {
     await nextTick()
     renderTurnstile('#admin-turnstile-container', turnstileSiteKey.value)
@@ -1339,6 +1535,7 @@ const loadSettings = async () => {
         preferred_theme: normalizePreferredThemeSetting(settingsData.preferred_theme),
         default_language: normalizeDefaultLanguageSetting(settingsData.default_language),
         theme_options: formatThemeOptions(settingsData.theme_options),
+        auto_discovery: settingsData.auto_discovery === 'true' || settingsData.auto_discovery === true,
         is_public: settingsData.is_public === 'true',
         show_price: settingsData.show_price === 'true',
         show_expire: settingsData.show_expire === 'true',
@@ -1351,9 +1548,11 @@ const loadSettings = async () => {
         tg_notify: normalizeTgNotifySetting(settingsData.tg_notify),
         expire_reminder: normalizeExpireReminderSetting(settingsData.expire_reminder),
         resource_alert_rules: normalizeResourceAlertRulesSetting(settingsData.resource_alert_rules),
+        traffic_alert_threshold: Number(settingsData.traffic_alert_threshold) || 0,
         tg_bot_token: settingsData.tg_bot_token || '',
         tg_chat_id: settingsData.tg_chat_id || '',
         notification_timezone: normalizeNotificationTimezoneSetting(settingsData.notification_timezone),
+        notification_language: normalizeNotificationLanguageSetting(settingsData.notification_language),
         expire_notification_time: normalizeExpireNotificationTimeSetting(settingsData.expire_notification_time),
         notification_webhook_enabled: settingsData.notification_webhook_enabled === 'true' || settingsData.notification_webhook_enabled === true,
         notification_webhook_url: settingsData.notification_webhook_url || '',
@@ -1370,19 +1569,30 @@ const loadSettings = async () => {
         cloudflare_token: settingsData.cloudflare_token || '',
         jwt_secret: '',
         username: settingsData.username || '',
+        password_configured: settingsData.password_configured === true,
         password: '',
         confirm_password: '',
         custom_ct: settingsData.custom_ct || '',
         custom_cu: settingsData.custom_cu || '',
         custom_cm: settingsData.custom_cm || '',
         custom_bd: settingsData.custom_bd || '',
+        node_1: settingsData.node_1 || '', node_2: settingsData.node_2 || '', node_3: settingsData.node_3 || '', node_4: settingsData.node_4 || '',
+        custom_ct_name: settingsData.custom_ct_name || '电信',
+        custom_cu_name: settingsData.custom_cu_name || '联通',
+        custom_cm_name: settingsData.custom_cm_name || '移动',
+        custom_bd_name: settingsData.custom_bd_name || 'BGP',
+        node_1_name: settingsData.node_1_name || 'Node 1', node_2_name: settingsData.node_2_name || 'Node 2', node_3_name: settingsData.node_3_name || 'Node 3', node_4_name: settingsData.node_4_name || 'Node 4',
         theme_url: settingsData.theme_url || '',
         csp_static: settingsData.csp_static || '',
-        csp_api: settingsData.csp_api || ''
+        csp_api: settingsData.csp_api || '',
+        ua: settingsData.ua || 'cfsm',
+        app_password: settingsData.app_password || ''
       }
       applyMikusThemeOptions(settingsData.theme_options)
-      changeAdminPassword.value = !String(settings.value.username || '').trim()
+      changeAdminPassword.value = !settings.value.password_configured || !String(settings.value.username || '').trim()
       apiSecret.value = data.api_secret || ''
+      // 只有已保存到服务端的自动发现开关才提供复制安装命令，避免复制出当前并未生效的命令
+      savedAutoDiscovery.value = settings.value.auto_discovery
     }
   } catch (e) {
     console.error('[ERROR] Load settings failed:', e)
@@ -1440,10 +1650,21 @@ const saveSettings = async () => {
     return
   }
 
+  if (normalizeExpireReminderSetting(settings.value.expire_reminder) !== String(settings.value.expire_reminder)) {
+    validationError.value = trans.value.invalidExpireReminder || `Expiration reminder must be an integer from 0 to ${EXPIRE_REMINDER_DAYS_MAX} days`
+    return
+  }
+
   const shouldChangePassword = changeAdminPassword.value && (
     settings.value.password.length > 0 ||
     settings.value.confirm_password.length > 0
   )
+
+  if (!settings.value.password_configured && !shouldChangePassword) {
+    changeAdminPassword.value = true
+    validationError.value = trans.value.passwordRequired
+    return
+  }
 
   if (shouldChangePassword) {
     if (settings.value.password !== settings.value.confirm_password) {
@@ -1493,6 +1714,10 @@ const saveSettings = async () => {
     if (!cspStaticValid || !cspApiValid) {
       return
     }
+    if (!settingsPanelRef.value.validateSmtpFields()) {
+      validationError.value = trans.value.smtpConfigInvalid || 'SMTP configuration is incomplete, please check the SMTP settings'
+      return
+    }
   }
 
   saving.value = true
@@ -1513,6 +1738,7 @@ const saveSettings = async () => {
       appearance_options: {
         theme_options: themeOptionsResult.value
       },
+      auto_discovery: settings.value.auto_discovery ? 'true' : 'false',
       is_public: settings.value.is_public ? 'true' : 'false',
       show_price: settings.value.show_price ? 'true' : 'false',
       show_expire: settings.value.show_expire ? 'true' : 'false',
@@ -1525,9 +1751,11 @@ const saveSettings = async () => {
       tg_notify: normalizeTgNotifySetting(settings.value.tg_notify),
       expire_reminder: normalizeExpireReminderSetting(settings.value.expire_reminder),
       resource_alert_rules: normalizeResourceAlertRulesSetting(settings.value.resource_alert_rules),
+      traffic_alert_threshold: String(Math.max(0, Math.min(100, Number(settings.value.traffic_alert_threshold) || 0))),
       tg_bot_token: settings.value.tg_bot_token,
       tg_chat_id: settings.value.tg_chat_id,
       notification_timezone: normalizeNotificationTimezoneSetting(settings.value.notification_timezone),
+      notification_language: normalizeNotificationLanguageSetting(settings.value.notification_language),
       expire_notification_time: normalizeExpireNotificationTimeSetting(settings.value.expire_notification_time),
       notification_webhook_enabled: settings.value.notification_webhook_enabled ? 'true' : 'false',
       notification_webhook_url: settings.value.notification_webhook_url,
@@ -1547,8 +1775,16 @@ const saveSettings = async () => {
       custom_cu: pingNodeValidation.values.custom_cu,
       custom_cm: pingNodeValidation.values.custom_cm,
       custom_bd: pingNodeValidation.values.custom_bd,
+      node_1: pingNodeValidation.values.node_1, node_2: pingNodeValidation.values.node_2, node_3: pingNodeValidation.values.node_3, node_4: pingNodeValidation.values.node_4,
+      custom_ct_name: settings.value.custom_ct_name.trim(),
+      custom_cu_name: settings.value.custom_cu_name.trim(),
+      custom_cm_name: settings.value.custom_cm_name.trim(),
+      custom_bd_name: settings.value.custom_bd_name.trim(),
+      node_1_name: settings.value.node_1_name.trim(), node_2_name: settings.value.node_2_name.trim(), node_3_name: settings.value.node_3_name.trim(), node_4_name: settings.value.node_4_name.trim(),
       csp_static: settings.value.csp_static || '',
-      csp_api: settings.value.csp_api || ''
+      csp_api: settings.value.csp_api || '',
+      ua: String(settings.value.ua ?? '').trim(),
+      app_password: String(settings.value.app_password ?? '').trim()
     }
   }
 
@@ -1579,9 +1815,10 @@ const saveSettings = async () => {
   }
 }
 
-const loadServers = async () => {
+
+const loadServers = async (options = {}) => {
   try {
-    const result = await adminApiForSite({ action: 'list' })
+    const result = await adminApiForSite(options.refresh ? { action: 'list', refresh: true } : { action: 'list' })
     if (!result.error) {
       const data = result.data
       servers.value = data.servers || []
@@ -1590,8 +1827,26 @@ const loadServers = async () => {
       const serverGroups = [...new Set(servers.value.map(s => s.server_group || trans.value.default))]
       groups.value = serverGroups
     }
+    return result
   } catch (e) {
     console.error('[ERROR] Load servers failed:', e)
+    return { error: e.message }
+  }
+}
+
+// 清除 Workers 端服务器列表缓存并就地重新拉取（list 带 refresh 时服务端先清缓存再读 D1）
+const refreshServersCache = async () => {
+  if (cacheRefreshing.value) return
+  cacheRefreshing.value = true
+  try {
+    const result = await loadServers({ refresh: true })
+    if (result?.error) {
+      alertMessage.value = getMessage(result.error) || result.error || trans.value.operationFailed
+      return
+    }
+    alertMessage.value = trans.value.cacheCleared
+  } finally {
+    cacheRefreshing.value = false
   }
 }
 
@@ -1629,48 +1884,62 @@ const getInstallCommand = (serverId) => {
   return `curl -sL ${HOST}/install.sh | bash -s install -id=${serverId} -secret='${apiSecret.value}' -url=${HOST}/update`
 }
 
-const getUninstallCommand = () => {
-  const HOST = selectedApiBase.value
-  const isGo = deleteVersion.value === 'go'
-  const proxy = isGo ? deleteGhProxy.value.trim() : ''
-  if (isGo) {
-    const proxyParam = proxy ? ` --install-ghproxy=${proxy}` : ''
-    if (deleteTargetOs.value === 'windows') {
-      const ghUrl = buildGhRawUrl(proxy, '/huilang-me/cfsm-agent/main/install.ps1')
-      return `$script = "$env:TEMP\\install-cf-probe.ps1"; Invoke-WebRequest -Uri "${ghUrl}" -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script uninstall${proxyParam}`
-    }
-    const sudoPrefix = deleteTargetOs.value === 'mac' ? 'sudo ' : ''
-    const ghUrl = buildGhRawUrl(proxy, '/huilang-me/cfsm-agent/main/install.sh')
-    return `curl -fsSL ${ghUrl} | ${sudoPrefix}sh -s -- uninstall${proxyParam}`
+const resolveServerPingNode = (server, field) => {
+  const value = server?.[field]
+  const explicitEmpty = value === 0 || value === '0'
+  return {
+    value: explicitEmpty ? '' : (value || settings.value[field] || ''),
+    explicitEmpty
   }
-  if (deleteTargetOs.value === 'windows') {
-    return `irm ${HOST}/cf-server-monitor.ps1 -OutFile cf-server-monitor.ps1; powershell -ExecutionPolicy Bypass -File .\\cf-server-monitor.ps1 uninstall`
-  }
-  const shell = deleteTargetOs.value === 'alpine' || deleteTargetOs.value === 'openwrt' ? 'sh' : 'bash'
-  const sudoPrefix = deleteTargetOs.value === 'mac' ? 'sudo ' : ''
-  const script = deleteTargetOs.value === 'alpine' ? 'install-alpine.sh'
-    : deleteTargetOs.value === 'openwrt' ? 'install-openwrt.sh'
-    : deleteTargetOs.value === 'mac' ? 'install-mac.sh'
-    : deleteTargetOs.value === 'synology' ? 'install-synology.sh'
-    : 'install.sh'
-  return `curl -sL ${HOST}/${script} | ${sudoPrefix}${shell} -s uninstall`
 }
+
+const getUninstallCommand = () => buildUninstallCommand({
+  host: selectedApiBase.value,
+  targetOs: deleteTargetOs.value,
+  version: deleteVersion.value,
+  ghProxy: deleteGhProxy.value,
+  installMode: deleteInstallMode.value,
+  instance: deleteInstance.value,
+  all: deleteAllInstances.value,
+  trans: trans.value
+})
 
 const copyCmd = (serverId) => {
   const server = servers.value.find(s => s.id === serverId)
   copyServerId.value = serverId
   currentServerName.value = server?.name || ''
   targetOs.value = 'linux'
+  installMode.value = 'current-user'
   installGhProxy.value = ''
+  installVersion.value = ''
+  installInstance.value = ''
   collectInterval.value = server?.collect_interval ?? 0
   reportInterval.value = server?.report_interval || 60
   wssReportInterval.value = server?.wss_report_interval || 2
   connectionMode.value = getEffectiveConnectionMode(server?.connection_mode)
   pingMode.value = getEffectivePingMode(server?.ping_mode)
-  customCt.value = server?.custom_ct || settings.value.custom_ct
-  customCu.value = server?.custom_cu || settings.value.custom_cu
-  customCm.value = server?.custom_cm || settings.value.custom_cm
-  customBd.value = server?.custom_bd || settings.value.custom_bd
+  const customCtNode = resolveServerPingNode(server, 'custom_ct')
+  const customCuNode = resolveServerPingNode(server, 'custom_cu')
+  const customCmNode = resolveServerPingNode(server, 'custom_cm')
+  const customBdNode = resolveServerPingNode(server, 'custom_bd')
+  const node1Value = resolveServerPingNode(server, 'node_1')
+  const node2Value = resolveServerPingNode(server, 'node_2')
+  const node3Value = resolveServerPingNode(server, 'node_3')
+  const node4Value = resolveServerPingNode(server, 'node_4')
+  explicitEmptyNodes.value = {
+    custom_ct: customCtNode.explicitEmpty, custom_cu: customCuNode.explicitEmpty,
+    custom_cm: customCmNode.explicitEmpty, custom_bd: customBdNode.explicitEmpty,
+    node_1: node1Value.explicitEmpty, node_2: node2Value.explicitEmpty,
+    node_3: node3Value.explicitEmpty, node_4: node4Value.explicitEmpty
+  }
+  customCt.value = customCtNode.value
+  customCu.value = customCuNode.value
+  customCm.value = customCmNode.value
+  customBd.value = customBdNode.value
+  node1.value = node1Value.value
+  node2.value = node2Value.value
+  node3.value = node3Value.value
+  node4.value = node4Value.value
   networkInterface.value = server?.interface || ''
   resetDay.value = server?.reset_day ?? 1
   rxCorrection.value = server?.rx_correction ?? ''
@@ -1680,77 +1949,74 @@ const copyCmd = (serverId) => {
   showCopyModal.value = true
 }
 
-const hasCorrectionValue = (value) => value !== null && value !== undefined && value !== ''
-
-const buildGhRawUrl = (proxy, path) => {
-  const base = 'https://raw.githubusercontent.com'
-  if (!proxy) return `${base}${path}`
-  const cleanProxy = proxy.replace(/\/$/, '')
-  return `${cleanProxy}/${base}${path}`
+// 站点 UA 不是默认值时，安装命令必须带上：否则首次上报就会被 /update 的防火墙规则拦截，
+// 连自动发现都无法完成。
+const installUserAgent = () => {
+  const ua = String(settings.value.ua ?? '').trim()
+  return ua && ua !== 'cfsm' ? ua : ''
 }
 
-const getCustomInstallCommand = () => {
-  const HOST = selectedApiBase.value
-  const autoUpdateFlag = autoUpdate.value ? 1 : 0
-  const proxy = installGhProxy.value.trim()
-  const effectiveConnectionMode = getEffectiveConnectionMode(connectionMode.value)
-  const effectivePingMode = getEffectivePingMode(pingMode.value)
-  if (targetOs.value === 'windows') {
-    const params = [
-      'install'
-    ]
-    if (proxy) params.push(`--install-ghproxy='${proxy}'`)
-    params.push(
-      `-id='${copyServerId.value}'`,
-      `-secret='${apiSecret.value}'`,
-      `-url='${HOST}/update'`,
-      `-collect_interval='${collectInterval.value}'`,
-      `-interval='${reportInterval.value}'`,
-      `-connection_mode='${effectiveConnectionMode}'`,
-      `-ping_mode='${effectivePingMode}'`,
-      `-reset_day='${resetDay.value ?? 1}'`,
-      `-auto_update='${autoUpdateFlag}'`
-    )
-    if (customCt.value) params.push(`-ct='${customCt.value}'`)
-    if (customCu.value) params.push(`-cu='${customCu.value}'`)
-    if (customCm.value) params.push(`-cm='${customCm.value}'`)
-    if (customBd.value) params.push(`-bd='${customBd.value}'`)
-    if (networkInterface.value) params.push(`-interface='${networkInterface.value}'`)
-    if (hasCorrectionValue(rxCorrection.value)) params.push(`-rx_correction='${rxCorrection.value}'`)
-    if (hasCorrectionValue(txCorrection.value)) params.push(`-tx_correction='${txCorrection.value}'`)
-    const ghUrl = buildGhRawUrl(proxy, '/huilang-me/cfsm-agent/main/install.ps1')
-    return `$script = "$env:TEMP\\install-cf-probe.ps1"; Invoke-WebRequest -Uri "${ghUrl}" -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script ${params.join(' ')}`
+const getCustomInstallCommand = () => buildCustomInstallCommand({
+  host: selectedApiBase.value,
+  targetOs: targetOs.value,
+  installMode: installMode.value,
+  ghProxy: installGhProxy.value,
+  version: installVersion.value,
+  instance: installInstance.value,
+  autoUpdate: autoUpdate.value,
+  serverId: copyServerId.value,
+  secret: apiSecret.value,
+  ua: installUserAgent(),
+  trans: trans.value
+})
+
+const getAutoDiscoveryInstallCommand = () => buildAutoDiscoveryInstallCommand({
+  host: selectedApiBase.value,
+  targetOs: autoDiscoveryTargetOs.value,
+  installMode: autoDiscoveryInstallMode.value,
+  ghProxy: autoDiscoveryGhProxy.value,
+  name: autoDiscoveryName.value,
+  instance: autoDiscoveryInstance.value,
+  version: autoDiscoveryVersion.value,
+  autoUpdate: autoDiscoveryAutoUpdate.value,
+  secret: apiSecret.value,
+  ua: installUserAgent(),
+  trans: trans.value
+})
+
+const openAutoDiscoveryModal = () => {
+  if (!savedAutoDiscovery.value) {
+    alertMessage.value = trans.value.autoAddDisabledTip
+    return
   }
-  const params = ['install']
-  if (proxy) params.push(`--install-ghproxy=${proxy}`)
-  params.push(
-    `-id=${copyServerId.value}`,
-    `-secret='${apiSecret.value}'`,
-    `-url=${HOST}/update`,
-    `-collect_interval=${collectInterval.value}`,
-    `-interval=${reportInterval.value}`,
-    `-connection_mode=${effectiveConnectionMode}`,
-    `-ping_mode=${effectivePingMode}`,
-    `-reset_day=${resetDay.value ?? 1}`,
-    `-auto_update=${autoUpdateFlag}`
-  )
-  if (customCt.value) params.push(`-ct=${customCt.value}`)
-  if (customCu.value) params.push(`-cu=${customCu.value}`)
-  if (customCm.value) params.push(`-cm=${customCm.value}`)
-  if (customBd.value) params.push(`-bd=${customBd.value}`)
-  if (networkInterface.value) params.push(`-interface=${networkInterface.value}`)
-  if (hasCorrectionValue(rxCorrection.value)) params.push(`-rx_correction=${rxCorrection.value}`)
-  if (hasCorrectionValue(txCorrection.value)) params.push(`-tx_correction=${txCorrection.value}`)
-  const ghUrl = buildGhRawUrl(proxy, '/huilang-me/cfsm-agent/main/install.sh')
-  return `curl -fsSL ${ghUrl} | sh -s -- ${params.join(' ')}`
+
+  autoDiscoveryCopied.value = false
+  showAutoDiscoveryModal.value = true
+}
+
+const closeAutoDiscoveryModal = () => {
+  showAutoDiscoveryModal.value = false
+}
+
+const copyAutoDiscoveryCmd = async () => {
+  const copied = await copyTextToClipboard(getAutoDiscoveryInstallCommand())
+  if (!copied) {
+    alertMessage.value = trans.value.httpsRequired
+    return
+  }
+
+  autoDiscoveryCopied.value = true
+  setTimeout(() => {
+    autoDiscoveryCopied.value = false
+  }, 1500)
 }
 
 const copyCustomCmd = async () => {
   const cmd = getCustomInstallCommand()
-  try {
-    await navigator.clipboard.writeText(cmd)
-  } catch (e) {
-    document.execCommand('copy')
+  const copied = await copyTextToClipboard(cmd)
+  if (!copied) {
+    alertMessage.value = trans.value.httpsRequired
+    return
   }
 
   copiedCmd.value = true
@@ -1773,16 +2039,24 @@ const openEditModalFromCopy = () => {
 
 const copyUninstallCmd = async () => {
   const cmd = getUninstallCommand()
-  try {
-    await navigator.clipboard.writeText(cmd)
-  } catch (e) {
-    document.execCommand('copy')
+  const copied = await copyTextToClipboard(cmd)
+  if (!copied) {
+    alertMessage.value = trans.value.httpsRequired
+    return
   }
 
   uninstallCopied.value = true
   setTimeout(() => {
     uninstallCopied.value = false
   }, 1500)
+}
+
+// 逐台月流量告警阈值：空/未设置 → null（跟随全局）；否则夹取 0..100 整数（0 = 该服务器显式关闭）
+const normalizeTrafficAlertPercentField = (value) => {
+  if (value === '' || value === null || value === undefined) return null
+  const n = parseInt(value, 10)
+  if (!Number.isFinite(n)) return null
+  return Math.max(0, Math.min(100, n))
 }
 
 const createEditFormFromServer = (server) => ({
@@ -1799,6 +2073,7 @@ const createEditFormFromServer = (server) => ({
     expire_date: server.expire_date || '',
     traffic_limit: server.traffic_limit || '',
     traffic_calc_type: server.traffic_calc_type || 'total',
+    traffic_alert_percent: server.traffic_alert_percent ?? '',
     interface: server.interface || '',
     reset_day: server.reset_day ?? 1,
     collect_interval: server.collect_interval ?? 0,
@@ -1806,10 +2081,11 @@ const createEditFormFromServer = (server) => ({
     wss_report_interval: server.wss_report_interval || 2,
     connection_mode: getEffectiveConnectionMode(server.connection_mode),
     ping_mode: server.ping_mode === 'icmp' ? 'icmp' : 'tcp',
-    custom_ct: server.custom_ct || '',
-    custom_cu: server.custom_cu || '',
-    custom_cm: server.custom_cm || '',
-    custom_bd: server.custom_bd || '',
+    custom_ct: server.custom_ct ?? '',
+    custom_cu: server.custom_cu ?? '',
+    custom_cm: server.custom_cm ?? '',
+    custom_bd: server.custom_bd ?? '',
+    node_1: server.node_1 ?? '', node_2: server.node_2 ?? '', node_3: server.node_3 ?? '', node_4: server.node_4 ?? '',
     rx_correction: server.rx_correction ?? '',
     tx_correction: server.tx_correction ?? '',
     auto_update: server.auto_update === '1' || server.auto_update === 1 || server.auto_update === true,
@@ -1883,6 +2159,7 @@ const buildEditPayloadFromForm = (form) => {
       expire_date: normalizedExpireDate,
       traffic_limit: form.traffic_limit,
       traffic_calc_type: form.traffic_calc_type,
+      traffic_alert_percent: normalizeTrafficAlertPercentField(form.traffic_alert_percent),
       interface: form.interface,
       reset_day: form.reset_day,
       collect_interval: form.collect_interval,
@@ -1894,6 +2171,7 @@ const buildEditPayloadFromForm = (form) => {
       custom_cu: pingNodeValidation.values.custom_cu,
       custom_cm: pingNodeValidation.values.custom_cm,
       custom_bd: pingNodeValidation.values.custom_bd,
+      node_1: pingNodeValidation.values.node_1, node_2: pingNodeValidation.values.node_2, node_3: pingNodeValidation.values.node_3, node_4: pingNodeValidation.values.node_4,
       rx_correction: form.rx_correction,
       tx_correction: form.tx_correction,
       auto_update: form.auto_update ? '1' : '0',
@@ -1948,6 +2226,7 @@ const saveEdit = async () => {
     expire_date: normalizedExpireDate,
     traffic_limit: editForm.value.traffic_limit,
     traffic_calc_type: editForm.value.traffic_calc_type,
+    traffic_alert_percent: normalizeTrafficAlertPercentField(editForm.value.traffic_alert_percent),
     interface: editForm.value.interface,
     reset_day: editForm.value.reset_day,
     collect_interval: editForm.value.collect_interval,
@@ -1959,6 +2238,7 @@ const saveEdit = async () => {
     custom_cu: pingNodeValidation.values.custom_cu,
     custom_cm: pingNodeValidation.values.custom_cm,
     custom_bd: pingNodeValidation.values.custom_bd,
+    node_1: pingNodeValidation.values.node_1, node_2: pingNodeValidation.values.node_2, node_3: pingNodeValidation.values.node_3, node_4: pingNodeValidation.values.node_4,
     rx_correction: editForm.value.rx_correction,
     tx_correction: editForm.value.tx_correction,
     auto_update: editForm.value.auto_update ? '1' : '0',
@@ -1987,7 +2267,10 @@ const openDeleteModal = (id) => {
   currentServerName.value = server?.name || ''
   deleteTargetOs.value = 'linux'
   deleteVersion.value = 'go'
+  deleteInstallMode.value = 'current-user'
   deleteGhProxy.value = ''
+  deleteInstance.value = ''
+  deleteAllInstances.value = false
   uninstallCopied.value = false
   showDeleteModal.value = true
 }
@@ -2273,6 +2556,9 @@ const queryD1Usage = async () => {
 
 const sendTestNotification = async () => {
   if (testNotificationLoading.value) return
+  if (settingsPanelRef.value && !settingsPanelRef.value.validateSmtpFields()) {
+    return
+  }
   testNotificationLoading.value = true
   try {
     const result = await adminApiForSite({
@@ -2287,6 +2573,7 @@ const sendTestNotification = async () => {
       notification_webhook_body: settings.value.notification_webhook_body,
       notification_template: settings.value.notification_template,
       notification_timezone: normalizeNotificationTimezoneSetting(settings.value.notification_timezone),
+      notification_language: normalizeNotificationLanguageSetting(settings.value.notification_language),
       expire_notification_time: normalizeExpireNotificationTimeSetting(settings.value.expire_notification_time)
     })
     if (!result.error) {
